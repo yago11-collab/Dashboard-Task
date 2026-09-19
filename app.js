@@ -957,14 +957,76 @@ function confirmModal(message, detail, okLabel) {
   return new Promise(resolve => { modalResolve = resolve; });
 }
 
-// ===== Ajustes: calendarios =====
+// ===== Temas =====
+// Colores de muestra de cada tema: [barra lateral, fondo, acento, línea de texto]
+const THEMES = {
+  clasico: { name: 'Clásico', desc: 'Crema y teja, el de siempre', mode: 'auto',
+    preview: { light: ['#f3f2ec', '#faf9f5', '#d5714f', '#d2d1ca'], dark: ['#161513', '#1b1a18', '#e08a6c', '#45443f'] } },
+  calma: { name: 'Calma', desc: 'Blanco y azul, como Things', mode: 'auto',
+    preview: { light: ['#f5f6f8', '#ffffff', '#2f7cf6', '#d3d7dd'], dark: ['#18191c', '#1c1d21', '#4a90ff', '#3d4047'] } },
+  papel: { name: 'Papel', desc: 'Barra oscura y rojo, como Bear', mode: 'auto',
+    preview: { light: ['#2a2b2e', '#fbfaf7', '#d9473f', '#d8d3c9'], dark: ['#151618', '#1e1f21', '#ef6a62', '#404145'] } },
+  foco: { name: 'Foco', desc: 'Oscuro y compacto, como Linear', mode: 'dark',
+    preview: { light: ['#f3f4f6', '#fcfcfd', '#5e6ad2', '#d3d5da'], dark: ['#0b0c0e', '#101113', '#7c86e0', '#31343b'] } }
+};
+
+function readPref(key, fallback) { try { return localStorage.getItem(key) || fallback; } catch (e) { return fallback; } }
+function writePref(key, value) { try { localStorage.setItem(key, value); } catch (e) { /* sin almacenamiento: se aplica solo en esta sesión */ } }
+const currentTheme = () => { const t = readPref('tareas_theme', 'clasico'); return THEMES[t] ? t : 'clasico'; };
+const currentMode = (t) => readPref('tareas_mode_' + t, THEMES[t].mode);
+const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+
+function applyTheme() {
+  const t = currentTheme(), m = currentMode(t);
+  const dark = m === 'dark' || (m === 'auto' && darkQuery.matches);
+  document.documentElement.dataset.theme = t;
+  document.documentElement.dataset.mode = dark ? 'dark' : 'light';
+  const meta = document.getElementById('themeColor');
+  if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+}
+
+darkQuery.addEventListener('change', applyTheme);
+applyTheme();
+
+function appearanceSection() {
+  const wrap = h('div', {});
+  const draw = () => {
+    const t = currentTheme(), m = currentMode(t);
+    const dark = document.documentElement.dataset.mode === 'dark';
+    wrap.replaceChildren(
+      h('h4', {}, 'Tema'),
+      h('div', { class: 'theme-grid' }, Object.entries(THEMES).map(([key, th]) => {
+        const [side, bg, accent, line] = th.preview[dark ? 'dark' : 'light'];
+        return h('button', { class: 'theme-opt', 'aria-pressed': String(key === t), onclick: () => { writePref('tareas_theme', key); applyTheme(); draw(); } },
+          h('span', { class: 'theme-prev', style: 'background: ' + bg },
+            h('span', { style: 'background: ' + side }),
+            h('span', { class: 'tp-main' },
+              h('span', { class: 'tp-dot', style: 'background: ' + accent }),
+              h('span', { class: 'tp-line', style: 'background: ' + line + '; width: 80%' }),
+              h('span', { class: 'tp-line', style: 'background: ' + line + '; width: 55%' }))),
+          h('span', { class: 'theme-name' }, th.name),
+          h('span', { class: 'theme-desc' }, th.desc));
+      })),
+      h('h4', {}, 'Modo'),
+      h('div', { class: 'segmented', role: 'group', 'aria-label': 'Modo de color' },
+        [['auto', 'Automático'], ['light', 'Claro'], ['dark', 'Oscuro']].map(([key, label]) =>
+          h('button', { 'aria-pressed': String(m === key), onclick: () => { writePref('tareas_mode_' + t, key); applyTheme(); draw(); } }, label))),
+      h('p', { style: 'margin-top: 8px; font-size: 12.5px;' }, 'Se guarda en este dispositivo. Automático sigue el modo claro u oscuro del sistema.'));
+  };
+  draw();
+  return wrap;
+}
+
+// ===== Ajustes =====
 async function settingsModal() {
   const urls = h('textarea', { placeholder: 'https://calendar.google.com/calendar/ical/…/basic.ics', style: 'min-height: 90px; font-size: 12.5px;' });
   const feedInfo = h('p', { style: 'margin-top: 8px;' }, 'Preparando la dirección…');
   const status = h('p', { style: 'margin-top: 8px; min-height: 18px;' });
 
   openModal(h('div', {},
-    h('h3', {}, 'Calendario'),
+    h('h3', {}, 'Ajustes'),
+    appearanceSection(),
+    h('h4', {}, 'Calendario'),
     h('label', {}, 'Ver mi agenda en la vista Hoy'),
     h('p', {}, 'Pega la dirección privada en formato iCal de cada calendario, una por línea. En Google Calendar está en Configuración del calendario → “Dirección secreta en formato iCal”.'),
     h('div', { style: 'height: 8px;' }), urls, status,
@@ -980,7 +1042,7 @@ async function settingsModal() {
         await loadAgenda();
         status.textContent = state.agenda.errors.length ? 'Guardado, pero hay un problema: ' + state.agenda.errors.join(' · ')
           : state.agenda.configured ? 'Guardado. Hoy hay ' + state.agenda.events.length + (state.agenda.events.length === 1 ? ' evento.' : ' eventos.') : 'Guardado. No hay calendarios conectados.';
-      } }, 'Guardar'))));
+      } }, 'Guardar calendarios'))));
 
   const saved = await sb.from('app_settings').select('value').eq('key', 'calendar_ics_urls').maybeSingle();
   if (saved.error) status.textContent = 'No se han podido leer los ajustes: ' + saved.error.message;
@@ -1016,7 +1078,7 @@ function renderNav() {
     lotes: state.batches.length
   };
   const stale = state.tasks.filter(isStale).length;
-  const item = (key) => h('button', { class: 'nav-item' + (state.view === key ? ' on' : ''), onclick: () => setView(key) },
+  const item = (key) => h('button', { class: 'nav-item' + (state.view === key ? ' on' : ''), dataset: { view: key }, onclick: () => setView(key) },
     icon(VIEWS[key].icon), VIEWS[key].title, counts[key] ? h('span', { class: 'count' }, counts[key]) : null);
 
   $('#sidebar').replaceChildren(...[
@@ -1027,7 +1089,7 @@ function renderNav() {
     stale ? h('button', { class: 'side-note', onclick: () => setView('revision') },
       'Revisión: ' + (stale === 1 ? '1 tarea lleva' : stale + ' tareas llevan') + ' más de ' + STALE_DAYS + ' días parada' + (stale === 1 ? '' : 's')) : null,
     h('div', { class: 'side-foot' },
-      h('button', { class: 'nav-item', onclick: settingsModal }, icon('calendar-cog'), 'Calendario'),
+      h('button', { class: 'nav-item', onclick: settingsModal }, icon('settings'), 'Ajustes'),
       h('button', { class: 'nav-item', onclick: async () => { await sb.auth.signOut(); location.reload(); } }, icon('logout'), 'Cerrar sesión'))
   ].filter(Boolean));
 
@@ -1050,7 +1112,7 @@ function render() {
   banner.hidden = state.hasNewSchema && state.hasBatches;
   banner.textContent = 'Falta actualizar la base de datos: las fechas, las repeticiones y los lotes no se guardarán hasta ejecutar supabase/migracion-2026-09.sql en Supabase.';
 
-  if (state.view === 'hoy') $('#viewActions').append(h('button', { class: 'icon-btn only-mobile', title: 'Calendario', onclick: settingsModal }, icon('calendar-cog')));
+  if (state.view === 'hoy') $('#viewActions').append(h('button', { class: 'icon-btn only-mobile', title: 'Ajustes', 'aria-label': 'Ajustes', onclick: settingsModal }, icon('settings')));
   ({ hoy: renderHoy, proximo: renderProximo, tablero: renderTablero, lotes: renderLotes, revision: renderRevision, hecho: renderHecho })[state.view](view);
   renderNav();
   view.scrollTop = scroll;

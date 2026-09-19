@@ -3,3 +3,4 @@
 .env.*
 supabase/.temp/
 supabase/.branches/
+conexion-privada.md

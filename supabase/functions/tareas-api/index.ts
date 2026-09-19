@@ -216,6 +216,15 @@ async function updateTask(a: Record<string, any>) {
   return present(data, cols);
 }
 
+async function deleteTask(a: Record<string, any>) {
+  // Solo por id exacto: borrar por título sería demasiado fácil de equivocar
+  if (!a.id) throw new Error('Para borrar hace falta el id exacto de la tarea (consúltalo con list_tasks).');
+  const { data, error } = await db.from('tasks').delete().eq('id', a.id).select('id,title');
+  if (error) throw new Error(error.message);
+  if (!data || !data.length) throw new Error('No existe ninguna tarea con ese id.');
+  return { deleted: data[0] };
+}
+
 // ===== Herramientas (compartidas por MCP y OpenAPI) =====
 const dateHelp = 'Fecha como AAAA-MM-DD, o "hoy", "mañana", "pasado mañana" o un día de la semana en español.';
 const TOOLS = [
@@ -268,6 +277,12 @@ const TOOLS = [
         recurrence: { type: 'string', description: 'daily, weekdays, weekly o cadena vacía para que deje de repetirse.' },
       },
     },
+  },
+  {
+    name: 'delete_task',
+    description: 'Borra definitivamente una tarea. Requiere el id exacto. Úsalo solo si Yago lo pide de forma explícita; para tareas terminadas usa complete_task.',
+    handler: deleteTask,
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
   },
 ];
 
@@ -342,6 +357,7 @@ function openapi(base: string) {
       '/tasks/list': { post: op(TOOLS[1], 'Listar tareas') },
       '/tasks/complete': { post: op(TOOLS[2], 'Completar una tarea') },
       '/tasks/update': { post: op(TOOLS[3], 'Modificar una tarea') },
+      '/tasks/delete': { post: op(TOOLS[4], 'Borrar una tarea') },
     },
     components: { securitySchemes: { bearer: { type: 'http', scheme: 'bearer' } }, schemas: {} },
     security: [{ bearer: [] }],
@@ -353,6 +369,7 @@ const REST_ROUTES: Record<string, (a: Record<string, any>) => Promise<unknown>> 
   '/tasks/list': listTasks,
   '/tasks/complete': completeTask,
   '/tasks/update': updateTask,
+  '/tasks/delete': deleteTask,
 };
 
 Deno.serve(async (req) => {

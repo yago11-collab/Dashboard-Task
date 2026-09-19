@@ -1,0 +1,5 @@
+project_id = "zttdbsprkqconspnwzxx"
+
+# La función comprueba su propia clave (TAREAS_API_KEY), no el JWT de Supabase
+[functions.tareas-api]
+verify_jwt = false

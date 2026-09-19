@@ -49,6 +49,7 @@ function h(tag, attrs, ...kids) {
 }
 
 const icon = (name) => h('i', { class: 'ti ti-' + name, 'aria-hidden': 'true' });
+const emptyState = (ic, title, text) => h('div', { class: 'empty-state' }, icon(ic), h('strong', {}, title), text);
 const uuid = () => crypto.randomUUID();
 const pad = (n) => String(n).padStart(2, '0');
 const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -541,7 +542,8 @@ function renderHoy(view) {
   }
   active.forEach(t => box.append(taskRowEl(t, { hideDate: t.scheduledOn === today(), showList: !(hoyCol() && t.columnId === hoyCol().id) })));
   if (!active.length && !batchRows.length) {
-    box.append(h('p', { class: 'empty' }, doneToday.length ? 'Todo hecho por hoy.' : 'No hay nada planificado para hoy. Añade una tarea o trae alguna desde el tablero.'));
+    box.append(doneToday.length ? emptyState('circle-check', 'Todo hecho por hoy', 'Lo que completes mañana volverá a empezar de cero.')
+      : emptyState('sun', 'Nada planificado para hoy', 'Escribe una tarea arriba o abre una del tablero y ponle fecha de hoy.'));
   }
   if (doneToday.length) {
     box.append(h('div', { class: 'group-title' }, 'Hechas hoy'));
@@ -558,7 +560,7 @@ function renderProximo(view) {
 
   const box = h('div', { class: 'narrow' }, quickBar('Añadir con fecha: “Llamar al gestor el 25/9”…', { scheduledOn: addDays(today(), 1) }));
   if (!state.hasNewSchema) box.append(h('p', { class: 'empty' }, 'Las fechas estarán disponibles cuando se actualice la base de datos.'));
-  else if (!list.length) box.append(h('p', { class: 'empty' }, 'No hay tareas con fecha futura.'));
+  else if (!list.length) box.append(emptyState('calendar', 'Sin tareas con fecha', 'Ponle fecha a una tarea y aparecerá aquí, ordenada por día.'));
   let last = null;
   for (const t of list) {
     const key = keyOf(t);
@@ -572,7 +574,7 @@ function renderRevision(view) {
   const list = state.tasks.filter(isStale).sort((a, b) => ageDays(b) - ageDays(a));
   $('#viewSub').textContent = 'Decide qué haces con cada tarea parada: hacerla, ponerle fecha, aparcarla o borrarla';
   const box = h('div', { class: 'narrow' });
-  if (!list.length) box.append(h('p', { class: 'empty' }, 'No hay tareas paradas. Buen trabajo.'));
+  if (!list.length) box.append(emptyState('eye-check', 'Nada parado', 'Ninguna tarea lleva más de ' + STALE_DAYS + ' días sin moverse.'));
   const someday = somedayCol();
   const act = (label, fn) => h('button', { class: 'btn small', onclick: (e) => { e.stopPropagation(); fn(); } }, label);
   list.forEach(t => box.append(taskRowEl(t, { showList: true, showAge: true, actions: () => [
@@ -591,7 +593,7 @@ function renderHecho(view) {
   $('#viewSub').textContent = list.length ? list.length + ' completadas' : '';
   if (list.length) $('#viewActions').append(h('button', { class: 'btn', onclick: clearDone }, icon('trash'), 'Borrar completadas'));
   const box = h('div', { class: 'narrow' });
-  if (!list.length) box.append(h('p', { class: 'empty' }, 'Aquí aparecerá lo que vayas completando.'));
+  if (!list.length) box.append(emptyState('archive', 'Todavía no hay nada hecho', 'Lo que completes se guarda aquí hasta que lo borres.'));
   list.forEach(t => box.append(taskRowEl(t)));
   view.append(box);
 }
@@ -609,7 +611,7 @@ function cardEl(t) {
     h('div', { class: 'row-main', onclick: () => openDetail(t.id) },
       h('div', { class: 'row-title' }, t.title),
       t.note && !done ? h('div', { class: 'row-note' }, t.note) : null,
-      h('div', { class: 'row-meta' }, done ? [] : taskChips(t).filter(c => !c.classList.contains('urgent'))))
+      h('div', { class: 'row-meta' }, done ? [] : taskChips(t)))
   );
   return card;
 }
@@ -735,7 +737,7 @@ function renderLotes(view) {
   }
   $('#viewActions').append(h('button', { class: 'btn primary', onclick: newBatchModal }, icon('plus'), 'Nuevo lote'));
   if (!state.batches.length) {
-    view.append(h('p', { class: 'empty' }, 'Todavía no hay lotes. Crea uno, por ejemplo “Reels · semana 39”, con sus piezas.'));
+    view.append(emptyState('stack-2', 'Todavía no hay lotes', 'Crea uno, por ejemplo “Reels · semana 39”, y avanza todas sus piezas etapa a etapa.'));
     return;
   }
   state.batches.forEach(b => view.append(batchEl(b)));

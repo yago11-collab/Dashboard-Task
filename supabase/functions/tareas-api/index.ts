@@ -3,13 +3,17 @@
 //   MCP (Claude):      POST /tareas-api/k/<clave>/mcp
 //   REST (ChatGPT…):   /tareas-api/tasks…  con cabecera  Authorization: Bearer <clave>
 //   Esquema OpenAPI:   GET  /tareas-api/openapi.json
+//   Calendario (ICS):  GET  /tareas-api/k/<clave>/calendar.ics   (para suscribirse desde el iPhone o Google Calendar)
+//   Agenda en la app:  GET  /tareas-api/calendar?from=&to=       (con la sesión de Supabase del usuario)
 //
 // Secretos necesarios: TAREAS_API_KEY. SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY los pone Supabase.
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import IcalExpander from 'npm:ical-expander@3.1.0';
 
 const db = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
 const API_KEY = Deno.env.get('TAREAS_API_KEY') ?? '';
+const OWNER_ID = Deno.env.get('TAREAS_OWNER_ID') ?? '';
 const TIMEZONE = 'Europe/Madrid';
 const FUNCTION_NAME = 'tareas-api';
 
@@ -289,7 +293,7 @@ const TOOLS = [
 // ===== Respuestas HTTP =====
 const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-api-key, content-type, mcp-session-id, mcp-protocol-version',
+  'Access-Control-Allow-Headers': 'authorization, apikey, x-client-info, x-api-key, content-type, mcp-session-id, mcp-protocol-version',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
 };
 const json = (body: unknown, status = 200) =>
@@ -302,6 +306,134 @@ function keyOk(candidate: string | null | undefined): boolean {
   let diff = a.length ^ b.length;
   for (let i = 0; i < b.length; i++) diff |= (a[i % (a.length || 1)] ?? 0) ^ b[i];
   return diff === 0;
+}
+
+// ===== Calendario: tareas con fecha -> feed ICS =====
+const icsEscape = (v: string) => v.replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+const icsDate = (iso: string) => iso.replace(/-/g, '');
+
+function icsEvent(uid: string, date: string, summary: string, description?: string | null): string[] {
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+  const lines = [
+    'BEGIN:VEVENT',
+    `UID:${uid}@tareas-yago`,
+    `DTSTAMP:${stamp}`,
+    `DTSTART;VALUE=DATE:${icsDate(date)}`,
+    `DTEND;VALUE=DATE:${icsDate(addDays(date, 1))}`,
+    `SUMMARY:${icsEscape(summary)}`,
+  ];
+  if (description) lines.push(`DESCRIPTION:${icsEscape(description)}`);
+  lines.push('TRANSP:TRANSPARENT', 'END:VEVENT');
+  return lines;
+}
+
+// Las líneas de un ICS no deben pasar de 75 octetos: se pliegan con salto + espacio
+function icsFold(line: string): string {
+  const bytes = new TextEncoder().encode(line);
+  if (bytes.length <= 74) return line;
+  const out: string[] = [];
+  let current = '';
+  for (const ch of line) {
+    if (new TextEncoder().encode(current + ch).length > 73) { out.push(current); current = ' ' + ch; }
+    else current += ch;
+  }
+  out.push(current);
+  return out.join('\r\n');
+}
+
+async function tasksFeed(): Promise<Response> {
+  const cols = await getColumns();
+  const hecho = findColumn(cols, 'hecho');
+  const { data, error } = await db.from('tasks').select('*').is('completed_at', null);
+  if (error) throw new Error(error.message);
+  const now = today();
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Tareas de Yago//ES', 'CALSCALE:GREGORIAN',
+    'X-WR-CALNAME:Tareas', 'X-WR-TIMEZONE:' + TIMEZONE, 'REFRESH-INTERVAL;VALUE=DURATION:PT30M', 'X-PUBLISHED-TTL:PT30M'];
+
+  for (const t of data || []) {
+    if (t.priority === 'done' || t.column_id === hecho?.id) continue;
+    const mark = t.priority === 'urgent' ? '❗ ' : '';
+    // Lo atrasado se enseña hoy para que no se pierda en el pasado
+    if (t.scheduled_on) lines.push(...icsEvent(t.id + '-when', t.scheduled_on < now ? now : t.scheduled_on, mark + t.title, t.description));
+    if (t.deadline_on && t.deadline_on !== t.scheduled_on) {
+      lines.push(...icsEvent(t.id + '-deadline', t.deadline_on < now ? now : t.deadline_on, '⚑ Vence: ' + t.title, t.description));
+    }
+  }
+
+  const { data: batches } = await db.from('batches').select('id,title,stages,stage_dates');
+  const { data: items } = await db.from('batch_items').select('batch_id,stage');
+  for (const b of batches || []) {
+    const stages: string[] = b.stages || [];
+    for (const [k, date] of Object.entries((b.stage_dates || {}) as Record<string, string>)) {
+      const n = (items || []).filter((i) => i.batch_id === b.id && i.stage === Number(k)).length;
+      if (!n || !date) continue;
+      lines.push(...icsEvent(`${b.id}-stage-${k}`, date < now ? now : date, `${stages[Number(k)] ?? 'Etapa'} · ${b.title} (${n} ${n === 1 ? 'pieza' : 'piezas'})`));
+    }
+  }
+  lines.push('END:VCALENDAR');
+  return new Response(lines.map(icsFold).join('\r\n') + '\r\n', {
+    headers: { ...CORS, 'Content-Type': 'text/calendar; charset=utf-8', 'Cache-Control': 'no-cache' },
+  });
+}
+
+// ===== Calendario: eventos externos (Google, iCloud…) -> agenda de la app =====
+const madridParts = (d: Date) => {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(d);
+  const get = (type: string) => p.find((x) => x.type === type)?.value ?? '';
+  return { date: `${get('year')}-${get('month')}-${get('day')}`, time: `${get('hour')}:${get('minute')}` };
+};
+
+type AgendaEvent = { date: string; time: string | null; end: string | null; title: string; allDay: boolean };
+
+async function readAgenda(from: string, to: string): Promise<{ events: AgendaEvent[]; errors: string[]; configured: boolean }> {
+  const { data } = await db.from('app_settings').select('value').eq('key', 'calendar_ics_urls').maybeSingle();
+  const urls = String(data?.value || '').split(/\s+/).map((u) => u.trim().replace(/^webcal:/i, 'https:')).filter((u) => /^https:\/\//i.test(u));
+  const events: AgendaEvent[] = [];
+  const errors: string[] = [];
+  const start = new Date(from + 'T00:00:00Z'); start.setUTCDate(start.getUTCDate() - 1);
+  const end = new Date(to + 'T23:59:59Z'); end.setUTCDate(end.getUTCDate() + 1);
+
+  await Promise.all(urls.map(async (url, idx) => {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const expander = new IcalExpander({ ics: await res.text(), maxIterations: 2000 });
+      const found = expander.between(start, end);
+      const all = [
+        ...found.events.map((e: any) => ({ start: e.startDate, end: e.endDate, title: e.summary })),
+        ...found.occurrences.map((o: any) => ({ start: o.startDate, end: o.endDate, title: o.item.summary })),
+      ];
+      for (const e of all) {
+        const title = String(e.title || '(sin título)');
+        if (e.start.isDate) {
+          // Evento de día completo: puede durar varios días (el final es exclusivo)
+          const first = `${e.start.year}-${String(e.start.month).padStart(2, '0')}-${String(e.start.day).padStart(2, '0')}`;
+          const last = e.end ? `${e.end.year}-${String(e.end.month).padStart(2, '0')}-${String(e.end.day).padStart(2, '0')}` : addDays(first, 1);
+          for (let d = first; d < last && d <= to; d = addDays(d, 1)) {
+            if (d >= from) events.push({ date: d, time: null, end: null, title, allDay: true });
+          }
+        } else {
+          const s = madridParts(e.start.toJSDate());
+          if (s.date < from || s.date > to) continue;
+          events.push({ date: s.date, time: s.time, end: e.end ? madridParts(e.end.toJSDate()).time : null, title, allDay: false });
+        }
+      }
+    } catch (err) {
+      errors.push(`Calendario ${idx + 1}: ${(err as Error).message}`);
+    }
+  }));
+
+  events.sort((a, b) => a.date.localeCompare(b.date) || (a.time ?? '').localeCompare(b.time ?? '') || a.title.localeCompare(b.title));
+  return { events, errors, configured: urls.length > 0 };
+}
+
+// Rutas para la propia app: se identifican con la sesión de Supabase del usuario, no con la clave
+async function sessionUser(req: Request): Promise<boolean> {
+  const token = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!token) return false;
+  const { data, error } = await db.auth.getUser(token);
+  if (error || !data.user) return false;
+  return !OWNER_ID || data.user.id === OWNER_ID;
 }
 
 // ===== MCP (JSON-RPC sobre HTTP) =====
@@ -389,9 +521,21 @@ Deno.serve(async (req) => {
   let key = req.headers.get('x-api-key') || (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
   const inPath = path.match(/^\/k\/([^/]+)(\/.*)?$/);
   if (inPath) { key = decodeURIComponent(inPath[1]); path = inPath[2] || '/'; }
-  if (!keyOk(key)) return json({ error: 'Clave no válida' }, 401);
+  if (!keyOk(key)) {
+    if ((path === '/calendar' || path === '/feed-url') && req.method === 'GET' && await sessionUser(req)) {
+      if (path === '/feed-url') return json({ url: `https://${url.host}/functions/v1/${FUNCTION_NAME}/k/${API_KEY}/calendar.ics` });
+      const from = url.searchParams.get('from') || today();
+      const to = url.searchParams.get('to') || from;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return json({ error: 'Fechas no válidas' }, 400);
+      return json(await readAgenda(from, to));
+    }
+    return json({ error: 'Clave no válida' }, 401);
+  }
 
   if (path === '/mcp') return handleMcp(req);
+  if (path === '/calendar.ics' && req.method === 'GET') {
+    try { return await tasksFeed(); } catch (e) { return json({ error: (e as Error).message }, 500); }
+  }
 
   const handler = REST_ROUTES[path];
   if (!handler) return json({ error: 'Ruta no encontrada' }, 404);

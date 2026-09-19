@@ -24,7 +24,8 @@ const state = {
   hasBatches: true,
   detailId: null,
   addingIn: null,
-  loadedAt: 0
+  loadedAt: 0,
+  agenda: { date: null, events: [], errors: [], configured: false }
 };
 
 // ===== Utilidades =====
@@ -235,6 +236,30 @@ async function loadAll() {
     }));
   }
   state.loadedAt = Date.now();
+}
+
+// ===== Agenda: eventos de los calendarios externos, leídos por la función tareas-api =====
+const FUNCTION_URL = SUPABASE_URL + '/functions/v1/tareas-api';
+
+async function callFunction(path) {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) throw new Error('Sin sesión');
+  const res = await fetch(FUNCTION_URL + path, { headers: { Authorization: 'Bearer ' + session.access_token } });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || 'Error ' + res.status);
+  return body;
+}
+
+async function loadAgenda() {
+  try {
+    const day = today();
+    const r = await callFunction('/calendar?from=' + day + '&to=' + day);
+    state.agenda = { date: day, events: r.events || [], errors: r.errors || [], configured: !!r.configured };
+  } catch (e) {
+    console.error('No se ha podido leer la agenda:', e);
+    state.agenda = { date: today(), events: [], errors: [e.message], configured: state.agenda.configured };
+  }
+  if (state.view === 'hoy' && !state.detailId) render();
 }
 
 // ===== Reglas de negocio =====
@@ -496,6 +521,16 @@ function renderHoy(view) {
     box.append(h('button', { class: 'side-note', style: 'margin: 0 0 8px; width: 100%;', onclick: () => setView('revision') },
       stale.length === 1 ? 'Hay 1 tarea parada desde hace más de ' + STALE_DAYS + ' días. Revísala.' :
         'Hay ' + stale.length + ' tareas paradas desde hace más de ' + STALE_DAYS + ' días. Revísalas.'));
+  }
+  const agenda = state.agenda.date === today() ? state.agenda : { events: [], errors: [], configured: false };
+  if (agenda.events.length || (agenda.configured && agenda.errors.length)) {
+    box.append(h('div', { class: 'group-title', style: 'margin-top: 10px;' }, 'Agenda'));
+    const nowTime = new Date().toTimeString().slice(0, 5);
+    agenda.events.forEach(ev => box.append(h('div', { class: 'agenda-row' + (!ev.allDay && ev.end && ev.end < nowTime ? ' past' : '') },
+      h('span', { class: 'agenda-time' }, ev.allDay ? 'Todo el día' : ev.time + (ev.end ? '–' + ev.end : '')),
+      h('span', { class: 'agenda-title' }, ev.title))));
+    agenda.errors.forEach(msg => box.append(h('div', { class: 'agenda-row past' }, h('span', { class: 'agenda-time' }, icon('alert-triangle')), h('span', {}, 'No se ha podido leer un calendario (' + msg + ')'))));
+    box.append(h('div', { class: 'group-title' }, 'Tareas'));
   }
   for (const r of batchRows) {
     box.append(h('div', { class: 'row' }, h('span', { class: 'check', style: 'border-style: dashed;' }),
@@ -920,6 +955,50 @@ function confirmModal(message, detail, okLabel) {
   return new Promise(resolve => { modalResolve = resolve; });
 }
 
+// ===== Ajustes: calendarios =====
+async function settingsModal() {
+  const urls = h('textarea', { placeholder: 'https://calendar.google.com/calendar/ical/…/basic.ics', style: 'min-height: 90px; font-size: 12.5px;' });
+  const feedInfo = h('p', { style: 'margin-top: 8px;' }, 'Preparando la dirección…');
+  const status = h('p', { style: 'margin-top: 8px; min-height: 18px;' });
+
+  openModal(h('div', {},
+    h('h3', {}, 'Calendario'),
+    h('label', {}, 'Ver mi agenda en la vista Hoy'),
+    h('p', {}, 'Pega la dirección privada en formato iCal de cada calendario, una por línea. En Google Calendar está en Configuración del calendario → “Dirección secreta en formato iCal”.'),
+    h('div', { style: 'height: 8px;' }), urls, status,
+    h('label', {}, 'Ver mis tareas con fecha en el calendario'),
+    feedInfo,
+    h('div', { class: 'modal-foot' },
+      h('button', { class: 'btn', onclick: closeModal }, 'Cerrar'),
+      h('button', { class: 'btn primary', onclick: async () => {
+        status.textContent = 'Guardando…';
+        const { error } = await sb.from('app_settings').upsert({ key: 'calendar_ics_urls', value: urls.value.trim(), updated_at: new Date().toISOString() });
+        if (error) { status.textContent = 'No se ha podido guardar: ' + error.message; return; }
+        status.textContent = 'Guardado. Leyendo calendarios…';
+        await loadAgenda();
+        status.textContent = state.agenda.errors.length ? 'Guardado, pero hay un problema: ' + state.agenda.errors.join(' · ')
+          : state.agenda.configured ? 'Guardado. Hoy hay ' + state.agenda.events.length + (state.agenda.events.length === 1 ? ' evento.' : ' eventos.') : 'Guardado. No hay calendarios conectados.';
+      } }, 'Guardar'))));
+
+  const saved = await sb.from('app_settings').select('value').eq('key', 'calendar_ics_urls').maybeSingle();
+  if (saved.error) status.textContent = 'No se han podido leer los ajustes: ' + saved.error.message;
+  else if (saved.data) urls.value = saved.data.value || '';
+
+  try {
+    const { url } = await callFunction('/feed-url');
+    feedInfo.replaceChildren(
+      'Suscríbete una vez y las tareas con fecha, las fechas límite y las etapas de los lotes aparecerán en tu calendario. La dirección es privada: no la compartas.',
+      h('div', { style: 'display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;' },
+        h('a', { class: 'btn', href: url.replace(/^https:/, 'webcal:') }, icon('calendar-plus'), 'Suscribirme en este dispositivo'),
+        h('button', { class: 'btn', onclick: async () => {
+          try { await navigator.clipboard.writeText(url); toast('Dirección copiada'); }
+          catch (e) { prompt('Copia la dirección:', url); }
+        } }, icon('copy'), 'Copiar dirección')));
+  } catch (e) {
+    feedInfo.textContent = 'No se ha podido obtener la dirección: ' + e.message;
+  }
+}
+
 // ===== Navegación y render =====
 function setView(v) {
   state.view = v;
@@ -938,7 +1017,7 @@ function renderNav() {
   const item = (key) => h('button', { class: 'nav-item' + (state.view === key ? ' on' : ''), onclick: () => setView(key) },
     icon(VIEWS[key].icon), VIEWS[key].title, counts[key] ? h('span', { class: 'count' }, counts[key]) : null);
 
-  $('#sidebar').replaceChildren(
+  $('#sidebar').replaceChildren(...[
     h('div', { class: 'brand' }, icon('checkbox'), 'Tareas'),
     item('hoy'), item('proximo'), item('tablero'), item('lotes'),
     h('div', { class: 'nav-sep' }),
@@ -946,8 +1025,9 @@ function renderNav() {
     stale ? h('button', { class: 'side-note', onclick: () => setView('revision') },
       'Revisión: ' + (stale === 1 ? '1 tarea lleva' : stale + ' tareas llevan') + ' más de ' + STALE_DAYS + ' días parada' + (stale === 1 ? '' : 's')) : null,
     h('div', { class: 'side-foot' },
+      h('button', { class: 'nav-item', onclick: settingsModal }, icon('calendar-cog'), 'Calendario'),
       h('button', { class: 'nav-item', onclick: async () => { await sb.auth.signOut(); location.reload(); } }, icon('logout'), 'Cerrar sesión'))
-  );
+  ].filter(Boolean));
 
   $('#bottomnav').replaceChildren(...['hoy', 'proximo', 'tablero', 'lotes', 'hecho'].map(key =>
     h('button', { class: state.view === key ? 'on' : '', onclick: () => setView(key) }, icon(VIEWS[key].icon), VIEWS[key].title)));
@@ -968,6 +1048,7 @@ function render() {
   banner.hidden = state.hasNewSchema && state.hasBatches;
   banner.textContent = 'Falta actualizar la base de datos: las fechas, las repeticiones y los lotes no se guardarán hasta ejecutar supabase/migracion-2026-09.sql en Supabase.';
 
+  if (state.view === 'hoy') $('#viewActions').append(h('button', { class: 'icon-btn only-mobile', title: 'Calendario', onclick: settingsModal }, icon('calendar-cog')));
   ({ hoy: renderHoy, proximo: renderProximo, tablero: renderTablero, lotes: renderLotes, revision: renderRevision, hecho: renderHecho })[state.view](view);
   renderNav();
   view.scrollTop = scroll;
@@ -979,6 +1060,7 @@ async function start() {
   try {
     await loadAll();
     render();
+    loadAgenda();
   } catch (e) {
     console.error(e);
     $('#view').replaceChildren(h('p', { class: 'empty' }, 'No se han podido cargar las tareas: ' + (e.message || 'error de conexión') + '. Recarga la página.'));
@@ -1021,7 +1103,7 @@ document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState !== 'visible' || !idle || Date.now() - state.loadedAt < 30000) return;
   const { data: { session } } = await sb.auth.getSession();
   if (!session) return;
-  try { await loadAll(); render(); } catch (e) { console.error(e); }
+  try { await loadAll(); render(); loadAgenda(); } catch (e) { console.error(e); }
 });
 
 window.addEventListener('beforeunload', (e) => { if (pending > 0) { e.preventDefault(); e.returnValue = ''; } });

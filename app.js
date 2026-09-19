@@ -1112,7 +1112,7 @@ function render() {
   banner.hidden = state.hasNewSchema && state.hasBatches;
   banner.textContent = 'Falta actualizar la base de datos: las fechas, las repeticiones y los lotes no se guardarán hasta ejecutar supabase/migracion-2026-09.sql en Supabase.';
 
-  if (state.view === 'hoy') $('#viewActions').append(h('button', { class: 'icon-btn only-mobile', title: 'Ajustes', 'aria-label': 'Ajustes', onclick: settingsModal }, icon('settings')));
+  $('#viewActions').append(h('button', { class: 'icon-btn only-mobile', title: 'Ajustes', 'aria-label': 'Ajustes', onclick: settingsModal }, icon('settings')));
   ({ hoy: renderHoy, proximo: renderProximo, tablero: renderTablero, lotes: renderLotes, revision: renderRevision, hecho: renderHecho })[state.view](view);
   renderNav();
   view.scrollTop = scroll;

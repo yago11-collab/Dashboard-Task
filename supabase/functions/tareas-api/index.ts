@@ -234,6 +234,23 @@ async function deleteTask(a: Record<string, any>) {
   return { deleted: data[0] };
 }
 
+async function addIdea(a: Record<string, any>) {
+  const text = String(a.text || a.title || '').trim();
+  if (!text) throw new Error('Falta el texto de la idea.');
+  const { data, error } = await db.from('ideas')
+    .insert({ text, note: a.note ? String(a.note) : null, source: a.source ? String(a.source) : 'claude', user_id: OWNER_ID || null })
+    .select().single();
+  if (error) throw new Error(error.message);
+  return { id: data.id, text: data.text, note: data.note || undefined };
+}
+
+async function listIdeas() {
+  const { data, error } = await db.from('ideas').select('id,text,note,source,created_at')
+    .is('archived_at', null).order('created_at', { ascending: false }).limit(50);
+  if (error) throw new Error(error.message);
+  return { count: (data || []).length, ideas: data };
+}
+
 // ===== Herramientas (compartidas por MCP y OpenAPI) =====
 const dateHelp = 'Fecha como AAAA-MM-DD, o "hoy", "mañana", "pasado mañana" o un día de la semana en español.';
 const TOOLS = [
@@ -286,6 +303,18 @@ const TOOLS = [
         recurrence: { type: 'string', description: 'daily, weekdays, weekly o cadena vacía para que deje de repetirse.' },
       },
     },
+  },
+  {
+    name: 'add_idea',
+    description: 'Apunta una idea en la bandeja de ideas de Yago (no es una tarea: es algo que quiere recordar y decidir luego).',
+    handler: addIdea,
+    inputSchema: { type: 'object', properties: { text: { type: 'string' }, note: { type: 'string' } }, required: ['text'] },
+  },
+  {
+    name: 'list_ideas',
+    description: 'Lista las ideas pendientes de decidir.',
+    handler: listIdeas,
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'delete_task',
@@ -494,7 +523,9 @@ function openapi(base: string) {
       '/tasks/list': { post: op(TOOLS[1], 'Listar tareas') },
       '/tasks/complete': { post: op(TOOLS[2], 'Completar una tarea') },
       '/tasks/update': { post: op(TOOLS[3], 'Modificar una tarea') },
-      '/tasks/delete': { post: op(TOOLS[4], 'Borrar una tarea') },
+      '/ideas': { post: op(TOOLS[4], 'Apuntar una idea') },
+      '/ideas/list': { post: op(TOOLS[5], 'Listar ideas') },
+      '/tasks/delete': { post: op(TOOLS[6], 'Mandar una tarea a la papelera') },
     },
     components: { securitySchemes: { bearer: { type: 'http', scheme: 'bearer' } }, schemas: {} },
     security: [{ bearer: [] }],
@@ -506,6 +537,8 @@ const REST_ROUTES: Record<string, (a: Record<string, any>) => Promise<unknown>> 
   '/tasks/list': listTasks,
   '/tasks/complete': completeTask,
   '/tasks/update': updateTask,
+  '/ideas': addIdea,
+  '/ideas/list': listIdeas,
   '/tasks/delete': deleteTask,
 };
 

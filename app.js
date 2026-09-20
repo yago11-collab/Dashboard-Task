@@ -6,7 +6,7 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const APP_VERSION = '12';
+const APP_VERSION = '13';
 const STALE_DAYS = 10;
 const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana' };
 const BATCH_TEMPLATES = {
@@ -25,6 +25,8 @@ const state = {
   hasBatches: true,
   hasEstimates: true,
   hasTrash: true,
+  hasIdeas: true,
+  ideas: [],
   trash: [],
   offline: false,
   detailId: null,
@@ -204,7 +206,7 @@ async function flushOps() {
 function saveSnapshot() {
   try {
     localStorage.setItem(SNAPSHOT_KEY, JSON.stringify({
-      at: Date.now(), columns: state.columns, tasks: state.tasks, trash: state.trash, batches: state.batches
+      at: Date.now(), columns: state.columns, tasks: state.tasks, trash: state.trash, batches: state.batches, ideas: state.ideas
     }));
   } catch (e) { /* sin espacio */ }
 }
@@ -213,7 +215,7 @@ function loadSnapshot() {
   try {
     const raw = JSON.parse(localStorage.getItem(SNAPSHOT_KEY) || 'null');
     if (!raw || !raw.columns) return false;
-    state.columns = raw.columns; state.tasks = raw.tasks || []; state.trash = raw.trash || []; state.batches = raw.batches || [];
+    state.columns = raw.columns; state.tasks = raw.tasks || []; state.trash = raw.trash || []; state.batches = raw.batches || []; state.ideas = raw.ideas || [];
     state.loadedAt = raw.at || 0;
     return true;
   } catch (e) { return false; }
@@ -257,6 +259,7 @@ function deleteTasks(ids) {
   for (let i = 0; i < ids.length; i += 50) addOp({ table: 'tasks', action: 'deleteIn', ids: ids.slice(i, i + 50) });
 }
 
+const saveIdea = (i) => addOp({ table: 'ideas', action: 'upsert', rows: [{ id: i.id, text: i.text, note: i.note || null, source: i.source || 'app', archived_at: i.archivedAt || null }] });
 const saveBatch = (b) => addOp({ table: 'batches', action: 'upsert', rows: [{ id: b.id, title: b.title, stages: b.stages, stage_dates: b.stageDates, position: b.position }] });
 const saveItems = (items) => addOp({ table: 'batch_items', action: 'upsert', rows: items.map(i => ({ id: i.id, batch_id: i.batchId, title: i.title, stage: i.stage, position: i.position })) });
 
@@ -314,6 +317,8 @@ async function loadAll() {
   state.hasEstimates = !probeEstimate.error;
   const probeTrash = await sb.from('tasks').select('deleted_at').limit(1);
   state.hasTrash = !probeTrash.error;
+  const probeIdeas = await sb.from('ideas').select('id').limit(1);
+  state.hasIdeas = !probeIdeas.error;
 
   const cols = await run(sb.from('columns').select('*').order('position'));
   const rows = await run(sb.from('tasks').select('*').order('position'));
@@ -334,6 +339,12 @@ async function loadAll() {
     if (moved) migrated.push(...renumber(first.id));
   }
   if (migrated.length) saveTasks(migrated);
+
+  state.ideas = [];
+  if (state.hasIdeas) {
+    const rows = await run(sb.from('ideas').select('*').is('archived_at', null).order('created_at', { ascending: false }));
+    state.ideas = rows.map(r => ({ id: r.id, text: r.text, note: r.note || '', source: r.source || 'app', createdAt: r.created_at }));
+  }
 
   state.batches = [];
   if (state.hasBatches) {
@@ -763,6 +774,7 @@ const VIEWS = {
   proximo: { title: 'Próximo', icon: 'calendar' },
   tablero: { title: 'Tablero', icon: 'layout-kanban' },
   lotes: { title: 'Lotes', icon: 'stack-2' },
+  ideas: { title: 'Ideas', icon: 'bulb' },
   revision: { title: 'Revisión', icon: 'eye-check', hidden: true },
   hecho: { title: 'Hecho', icon: 'archive' },
   papelera: { title: 'Papelera', icon: 'trash', hidden: true }
@@ -879,6 +891,75 @@ function renderHecho(view) {
   const box = h('div', { class: 'narrow' });
   if (!list.length) box.append(emptyState('archive', 'Todavía no hay nada hecho', 'Lo que completes se guarda aquí hasta que lo borres.'));
   list.forEach(t => box.append(taskRowEl(t)));
+  view.append(box);
+}
+
+function archiveIdea(idea, mensaje, deshacerExtra) {
+  state.ideas = state.ideas.filter(i => i !== idea);
+  idea.archivedAt = new Date().toISOString();
+  saveIdea(idea);
+  render();
+  toast(mensaje, 6000, { label: 'Deshacer', onclick: () => {
+    idea.archivedAt = null;
+    state.ideas = [idea, ...state.ideas];
+    saveIdea(idea);
+    if (deshacerExtra) deshacerExtra();
+    render();
+  } });
+}
+
+function renderIdeas(view) {
+  const list = state.ideas;
+  $('#viewSub').textContent = list.length
+    ? list.length + (list.length === 1 ? ' idea sin decidir' : ' ideas sin decidir')
+    : 'Apunta aquí lo que se te ocurra; decidir qué hacer con ello es otro momento';
+  if (!state.hasIdeas) { view.append(h('p', { class: 'empty' }, 'Las ideas estarán disponibles cuando se actualice la base de datos.')); return; }
+
+  const box = h('div', { class: 'narrow' });
+  const input = h('input', { id: 'quickInput', type: 'text', placeholder: '¿Qué se te ha ocurrido?', autocomplete: 'off' });
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || !input.value.trim()) return;
+    const idea = { id: uuid(), text: input.value.trim(), note: '', source: 'app', createdAt: new Date().toISOString() };
+    state.ideas = [idea, ...state.ideas];
+    saveIdea(idea);
+    input.value = '';
+    render();
+    setTimeout(() => $('#quickInput') && $('#quickInput').focus(), 10);
+  });
+  box.append(h('div', { class: 'quick' }, icon('bulb'), input),
+    h('p', { class: 'quick-hint' }, 'También puedes mandárselas al bot de Telegram escribiendo “idea …”, o pedírselo a Claude.'));
+
+  if (!list.length) box.append(emptyState('bulb', 'Sin ideas pendientes', 'Todo lo que has apuntado ya está convertido en tarea, en pieza de un lote o descartado.'));
+
+  const FUENTES = { telegram: 'Telegram', claude: 'Claude', chatgpt: 'ChatGPT', app: 'App' };
+  list.forEach(idea => {
+    const dias = idea.createdAt ? daysBetween(iso(new Date(idea.createdAt)), today()) : 0;
+    box.append(h('div', { class: 'row' },
+      h('span', { class: 'check', style: 'border-style: dashed;' }),
+      h('div', { class: 'row-main' },
+        h('div', { class: 'row-title' }, idea.text),
+        h('div', { class: 'row-meta' },
+          h('span', { class: 'chip' }, FUENTES[idea.source] || idea.source),
+          h('span', { class: 'chip' }, dias === 0 ? 'hoy' : 'hace ' + dias + (dias === 1 ? ' día' : ' días')))),
+      h('div', { class: 'row-actions' },
+        h('button', { class: 'btn small', title: 'Convertir en tarea', onclick: () => {
+          const t = createTask({ title: idea.text, columnId: (somedayCol() || firstOpenCol() || {}).id });
+          if (t) archiveIdea(idea, 'Ahora es una tarea en ' + state.columns.find(c => c.id === t.columnId).title,
+            () => { state.tasks = state.tasks.filter(x => x !== t); deleteTasks([t.id]); });
+        } }, 'A tarea'),
+        state.batches.length ? h('button', { class: 'btn small', title: 'Mandar a un lote', onclick: (e) => {
+          popMenu(e.currentTarget, state.batches.map(b => ({
+            label: b.title, icon: 'stack-2', onclick: () => {
+              const item = { id: uuid(), batchId: b.id, title: idea.text, stage: 0, position: b.items.length };
+              b.items.push(item);
+              saveItems([item]);
+              archiveIdea(idea, 'A ' + b.title,
+                () => { b.items = b.items.filter(x => x !== item); addOp({ table: 'batch_items', action: 'deleteIn', ids: [item.id] }); });
+            }
+          })));
+        } }, 'A lote') : null,
+        h('button', { class: 'btn small danger', title: 'Descartar', onclick: () => archiveIdea(idea, 'Idea descartada') }, 'Descartar'))));
+  });
   view.append(box);
 }
 
@@ -1353,9 +1434,14 @@ function searchModal() {
     const q = slug(input.value.trim());
     if (!q) { results.replaceChildren(h('p', { class: 'search-hint' }, 'Escribe para buscar en el título, la nota y las subtareas. Busca también en lo hecho y en la papelera.')); return; }
     const match = (t) => slug([t.title, t.note, ...(t.subtasks || []).map(x => x.text)].join(' ')).includes(q);
+    const ideasFound = state.ideas.filter(i => slug(i.text + ' ' + (i.note || '')).includes(q));
     const found = [...state.tasks.filter(match), ...state.trash.filter(match)].slice(0, 30);
-    if (!found.length) { results.replaceChildren(h('p', { class: 'search-hint' }, 'Nada coincide con “' + input.value.trim() + '”.')); return; }
-    results.replaceChildren(...found.map(t => {
+    if (!found.length && !ideasFound.length) { results.replaceChildren(h('p', { class: 'search-hint' }, 'Nada coincide con “' + input.value.trim() + '”.')); return; }
+    results.replaceChildren(...ideasFound.slice(0, 10).map(i =>
+      h('button', { class: 'search-item', onclick: () => { closeModal(); setView('ideas'); } },
+        h('span', { class: 'search-title' }, i.text),
+        h('span', { class: 'search-meta' }, 'Idea'))),
+      ...found.map(t => {
       const col = state.columns.find(c => c.id === t.columnId);
       const estado = t.deletedAt ? 'Papelera' : t.checked ? 'Hecho' : (col ? col.title : '');
       return h('button', { class: 'search-item', onclick: () => {
@@ -1438,7 +1524,8 @@ function renderNav() {
   const counts = {
     hoy: state.tasks.filter(isToday).length + batchDueToday().length,
     proximo: state.tasks.filter(isUpcoming).length,
-    lotes: state.batches.length
+    lotes: state.batches.length,
+    ideas: state.ideas.length
   };
   const stale = state.tasks.filter(isStale).length;
   const item = (key) => h('button', { class: 'nav-item' + (state.view === key ? ' on' : ''), dataset: { view: key }, onclick: () => setView(key) },
@@ -1446,7 +1533,7 @@ function renderNav() {
 
   $('#sidebar').replaceChildren(...[
     h('div', { class: 'brand' }, icon('checkbox'), 'Tareas'),
-    item('hoy'), item('proximo'), item('tablero'), item('lotes'),
+    item('hoy'), item('proximo'), item('tablero'), item('lotes'), item('ideas'),
     h('div', { class: 'nav-sep' }),
     item('hecho'),
     state.trash.length ? h('button', { class: 'nav-item' + (state.view === 'papelera' ? ' on' : ''), onclick: () => setView('papelera') },
@@ -1458,7 +1545,7 @@ function renderNav() {
       h('button', { class: 'nav-item', onclick: async () => { await sb.auth.signOut(); location.reload(); } }, icon('logout'), 'Cerrar sesión'))
   ].filter(Boolean));
 
-  $('#bottomnav').replaceChildren(...['hoy', 'proximo', 'tablero', 'lotes', 'hecho'].map(key =>
+  $('#bottomnav').replaceChildren(...['hoy', 'proximo', 'tablero', 'lotes', 'ideas', 'hecho'].map(key =>
     h('button', { class: state.view === key ? 'on' : '', onclick: () => setView(key) }, icon(VIEWS[key].icon), VIEWS[key].title)));
 }
 
@@ -1482,7 +1569,7 @@ function render() {
 
   $('#viewActions').append(h('button', { class: 'icon-btn', title: 'Buscar (/)', 'aria-label': 'Buscar', onclick: searchModal }, icon('search')));
   $('#viewActions').append(h('button', { class: 'icon-btn only-mobile', title: 'Ajustes', 'aria-label': 'Ajustes', onclick: settingsModal }, icon('settings')));
-  ({ hoy: renderHoy, proximo: renderProximo, tablero: renderTablero, lotes: renderLotes, revision: renderRevision, hecho: renderHecho, papelera: renderPapelera })[state.view](view);
+  ({ hoy: renderHoy, proximo: renderProximo, tablero: renderTablero, lotes: renderLotes, ideas: renderIdeas, revision: renderRevision, hecho: renderHecho, papelera: renderPapelera })[state.view](view);
   renderNav();
   view.scrollTop = scroll;
   if (view.querySelector('.board')) view.querySelector('.board').scrollLeft = boardScroll;

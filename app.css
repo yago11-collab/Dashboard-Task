@@ -583,7 +583,8 @@ h1 { font-size: var(--h1-size); font-weight: 600; letter-spacing: -0.02em; }
     background: var(--bg-card); border-top: 1px solid var(--border);
     padding: 6px 4px calc(6px + env(safe-area-inset-bottom)); justify-content: space-around;
   }
-  .bottomnav button { display: flex; flex-direction: column; align-items: center; gap: 1px; font-size: 10.5px; color: var(--text-3); padding: 4px 8px; min-width: 56px; }
+  .bottomnav button { display: flex; flex-direction: column; align-items: center; gap: 1px; font-size: 10px; color: var(--text-3); padding: 4px 2px; min-width: 0; flex: 1; }
+  .bottomnav button i { font-size: 21px; }
   .bottomnav button i { font-size: 22px; }
   .bottomnav button.on { color: var(--accent-text); }
   .toast { bottom: calc(80px + env(safe-area-inset-bottom)); }

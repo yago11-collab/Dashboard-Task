@@ -142,13 +142,15 @@ async function dailyMessage(): Promise<string> {
 }
 
 async function reviewMessage(): Promise<string> {
+  const { count: ideas } = await api('/ideas/list', {}).catch(() => ({ count: 0 }));
+  const colaIdeas = ideas ? `\n\n💡 Tienes ${ideas} ${ideas === 1 ? 'idea sin decidir' : 'ideas sin decidir'} (/ideas).` : '';
   const { tasks } = await api('/tasks/list', { filter: 'todas' });
   const paradas = tasks.filter((t: any) => !t.when && !t.deadline && !t.recurrence && t.list && !/algun dia|algún día/i.test(t.list));
-  if (!paradas.length) return '<b>Revisión semanal</b>\n\nNo hay tareas paradas. Buen trabajo.';
+  if (!paradas.length) return '<b>Revisión semanal</b>\n\nNo hay tareas paradas. Buen trabajo.' + colaIdeas;
   const lista = paradas.slice(0, 15).map(taskLine).join('\n');
   return `<b>Revisión semanal</b>\n\nEstas tareas no tienen fecha:\n\n${lista}` +
     (paradas.length > 15 ? `\n\n…y ${paradas.length - 15} más.` : '') +
-    '\n\nDecide con cada una: ponle fecha desde la app, o escríbeme <b>hecho &lt;texto&gt;</b> si ya la hiciste.';
+    '\n\nDecide con cada una: ponle fecha desde la app, o escríbeme <b>hecho &lt;texto&gt;</b> si ya la hiciste.' + colaIdeas;
 }
 
 // Avisos de tareas con hora: se mandan una vez y se borra la hora para no repetirlos
@@ -183,7 +185,7 @@ async function handleMessage(chatId: string, text: string) {
   if (lower === 'start' || clean === '/start') {
     if (!bound) {
       await db.from('app_settings').upsert({ key: CHAT_KEY, value: chatId, updated_at: new Date().toISOString() });
-      await send(chatId, '<b>Listo.</b> Este chat ya está conectado a tu planificador.\n\nEscríbeme una tarea y la añado: “grabar reel mañana”, “facturación viernes !”, “revisar DMs cada día”.\n\nComandos: /hoy, /pendientes, y <b>hecho &lt;texto&gt;</b>.');
+      await send(chatId, '<b>Listo.</b> Este chat ya está conectado a tu planificador.\n\nEscríbeme una tarea y la añado: “grabar reel mañana”, “facturación viernes !”, “revisar DMs cada día”.\nPara una idea suelta: <b>idea lo que sea</b>.\n\nComandos: /hoy, /ideas, /pendientes, y <b>hecho &lt;texto&gt;</b>.');
     } else if (bound === chatId) {
       await send(chatId, 'Este chat ya estaba conectado. Escríbeme una tarea o usa /hoy.');
     } else {
@@ -206,7 +208,26 @@ async function handleMessage(chatId: string, text: string) {
     return;
   }
   if (clean === '/ayuda' || clean === '/help') {
-    await send(chatId, 'Escríbeme una tarea para añadirla. Entiendo “hoy”, “mañana”, “el viernes”, “25/9”, “cada día”, “!” para urgente y “#lista”.\n\n/hoy · el plan del día\n/pendientes · lo que no tiene fecha\nhecho &lt;texto&gt; · completar una tarea');
+    await send(chatId, 'Escríbeme una tarea para añadirla. Entiendo “hoy”, “mañana”, “el viernes”, “25/9”, “a las 17:00”, “cada día”, “!” para urgente y “#lista”.\n\n<b>idea &lt;texto&gt;</b> · apunta una idea, sin convertirla en tarea\n/hoy · el plan del día\n/ideas · ideas pendientes\n/pendientes · lo que no tiene fecha\nhecho &lt;texto&gt; · completar una tarea');
+    return;
+  }
+
+  if (clean === '/ideas' || lower === 'ideas') {
+    const { ideas } = await api('/ideas/list', {});
+    if (!ideas.length) { await send(chatId, 'No hay ideas pendientes.'); return; }
+    const lines = ideas.slice(0, 20).map((i: any, n: number) => `${n + 1}. ${escapeHtml(i.text)}`).join('\n');
+    await send(chatId, `<b>Ideas pendientes</b>\n\n${lines}\n\nSe deciden en la app, en la vista Ideas.`);
+    return;
+  }
+
+  const ideaMatch = clean.match(/^\/?(idea|ideas?:)\s+(.+)$/is);
+  if (ideaMatch) {
+    try {
+      const i = await api('/ideas', { text: ideaMatch[2].trim(), source: 'telegram' });
+      await send(chatId, `💡 Apuntada: <b>${escapeHtml(i.text)}</b>\nLa decides luego en la vista Ideas.`);
+    } catch (e) {
+      await send(chatId, '⚠️ ' + escapeHtml((e as Error).message));
+    }
     return;
   }
 

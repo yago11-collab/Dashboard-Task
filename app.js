@@ -22,6 +22,7 @@ const state = {
   batches: [],   // { id, title, stages[], stageDates{}, position, items[] }
   hasNewSchema: true,
   hasBatches: true,
+  hasEstimates: true,
   detailId: null,
   addingIn: null,
   loadedAt: 0,
@@ -49,6 +50,24 @@ function h(tag, attrs, ...kids) {
 }
 
 const icon = (name) => h('i', { class: 'ti ti-' + name, 'aria-hidden': 'true' });
+const ESTIMATES = [15, 30, 60, 90, 120];
+
+function fmtMin(n) {
+  if (!n) return '';
+  if (n < 60) return n + ' min';
+  const hours = Math.floor(n / 60), rest = n % 60;
+  return hours + ' h' + (rest ? ' ' + rest : '');
+}
+
+const sumMinutes = (list) => list.reduce((total, t) => total + (t.estimateMin || 0), 0);
+
+// Próximo día de la semana (1 = lunes), siempre en el futuro
+function nextWeekday(target) {
+  let d = addDays(today(), 1);
+  while (parseISO(d).getDay() !== target) d = addDays(d, 1);
+  return d;
+}
+
 const emptyState = (ic, title, text) => h('div', { class: 'empty-state' }, icon(ic), h('strong', {}, title), text);
 const uuid = () => crypto.randomUUID();
 const pad = (n) => String(n).padStart(2, '0');
@@ -133,6 +152,7 @@ function taskRow(t) {
     row.last_done_on = t.lastDoneOn;
     row.completed_at = t.completedAt;
   }
+  if (state.hasEstimates) row.estimate_min = t.estimateMin;
   return row;
 }
 
@@ -186,6 +206,7 @@ function fromRow(r, migrated) {
     recurrence: r.recurrence || null,
     lastDoneOn: r.last_done_on || null,
     completedAt: r.completed_at || null,
+    estimateMin: r.estimate_min || null,
     createdAt: r.created_at || null
   };
   // Prefijos antiguos (!!! urgente, >>> recurrente): se convierten en campos reales
@@ -208,6 +229,8 @@ async function loadAll() {
   state.hasNewSchema = !probeTasks.error;
   const probeBatches = await sb.from('batches').select('id').limit(1);
   state.hasBatches = !probeBatches.error;
+  const probeEstimate = await sb.from('tasks').select('estimate_min').limit(1);
+  state.hasEstimates = !probeEstimate.error;
 
   const cols = await run(sb.from('columns').select('*').order('position'));
   const rows = await run(sb.from('tasks').select('*').order('position'));
@@ -349,7 +372,7 @@ function createTask(fields) {
     id: uuid(), title: fields.title, note: '', columnId: colId, position: colTasks(colId).length,
     checked: false, urgent: !!fields.urgent, subtasks: [],
     scheduledOn: fields.scheduledOn || null, deadlineOn: null, recurrence: fields.recurrence || null,
-    lastDoneOn: null, completedAt: null, createdAt: new Date().toISOString()
+    lastDoneOn: null, completedAt: null, estimateMin: fields.estimateMin || null, createdAt: new Date().toISOString()
   };
   state.tasks.push(t);
   saveTasks([t]);
@@ -450,6 +473,7 @@ function taskChips(t, opts = {}) {
     chips.push(h('span', { class: 'chip ' + (t.scheduledOn < now && !t.checked ? 'late' : 'date') }, icon('calendar'), fmtDate(t.scheduledOn)));
   }
   if (t.recurrence) chips.push(h('span', { class: 'chip recur' }, icon('repeat'), RECURRENCES[t.recurrence] || t.recurrence));
+  if (t.estimateMin) chips.push(h('span', { class: 'chip' }, icon('clock'), fmtMin(t.estimateMin)));
   if (t.subtasks.length) chips.push(h('span', { class: 'chip' }, icon('list-check'), t.subtasks.filter(s => s.checked).length + '/' + t.subtasks.length));
   if (opts.showList) {
     const col = state.columns.find(c => c.id === t.columnId);
@@ -485,6 +509,125 @@ function quickBar(placeholder, defaults) {
   ];
 }
 
+// ===== Aplazar rápido =====
+function closePopMenu() {
+  const el = $('.popmenu');
+  if (el) el.remove();
+}
+
+function popMenu(anchor, items) {
+  closePopMenu();
+  const menu = h('div', { class: 'popmenu' }, items.map(it =>
+    h('button', { onclick: () => { closePopMenu(); it.onclick(); } }, it.icon ? icon(it.icon) : null, it.label,
+      it.hint ? h('span', { class: 'hint' }, it.hint) : null)));
+  document.body.append(menu);
+  const r = anchor.getBoundingClientRect();
+  const box = menu.getBoundingClientRect();
+  menu.style.top = Math.min(r.bottom + 6, window.innerHeight - box.height - 8) + 'px';
+  menu.style.left = Math.max(8, Math.min(r.right - box.width, window.innerWidth - box.width - 8)) + 'px';
+  setTimeout(() => {
+    const close = (e) => { if (!menu.contains(e.target)) { closePopMenu(); document.removeEventListener('click', close); } };
+    document.addEventListener('click', close);
+  }, 10);
+}
+
+function setWhen(t, value, label) {
+  t.scheduledOn = value;
+  if (value && t.checked) { t.checked = false; t.completedAt = null; }
+  saveTasks([t]);
+  render();
+  toast(value ? label + ' · ' + fmtDate(value) : 'Sin fecha');
+}
+
+function snoozeButton(t) {
+  return h('button', { class: 'icon-btn', title: 'Aplazar', 'aria-label': 'Aplazar', onclick: (e) => {
+    e.stopPropagation();
+    const someday = somedayCol();
+    popMenu(e.currentTarget, [
+      { label: 'Hoy', icon: 'sun', hint: fmtDate(today()), onclick: () => setWhen(t, today(), 'Para hoy') },
+      { label: 'Mañana', icon: 'arrow-right', hint: fmtDate(addDays(today(), 1)), onclick: () => setWhen(t, addDays(today(), 1), 'Aplazada') },
+      nextWeekday(1) !== addDays(today(), 1) ? { label: 'El lunes', icon: 'calendar', hint: fmtDate(nextWeekday(1)), onclick: () => setWhen(t, nextWeekday(1), 'Aplazada') } : null,
+      { label: 'En una semana', icon: 'calendar-plus', hint: fmtDate(addDays(today(), 7)), onclick: () => setWhen(t, addDays(today(), 7), 'Aplazada') },
+      someday ? { label: 'Algún día', icon: 'bulb', onclick: () => { t.scheduledOn = null; moveTask(t, someday.id); toast('A Algún día'); } } : null,
+      t.scheduledOn ? { label: 'Quitar la fecha', icon: 'x', onclick: () => setWhen(t, null) } : null
+    ].filter(Boolean));
+  } }, icon('clock'));
+}
+
+// ===== Planificador del día =====
+function plannerCandidates() {
+  const now = today();
+  const hecho = hechoCol(), hoy = hoyCol(), someday = somedayCol();
+  const open = state.tasks.filter(t => !t.checked && !isDoneToday(t) && !(hecho && t.columnId === hecho.id));
+  const score = (t) => {
+    if (t.deadlineOn && t.deadlineOn <= now) return 0;            // vence o ha vencido
+    if (t.scheduledOn && t.scheduledOn < now) return 1;           // atrasada
+    if (t.scheduledOn === now) return 2;                          // ya era para hoy
+    if (hoy && t.columnId === hoy.id) return 3;                   // está en la lista Hoy
+    return 4;                                                      // parada en otra lista
+  };
+  return open.filter(t => {
+    if (t.scheduledOn && t.scheduledOn > now) return false;        // ya tiene día futuro
+    if (someday && t.columnId === someday.id) return false;        // Algún día no entra en el plan
+    return score(t) < 4 || ageDays(t) >= STALE_DAYS;
+  }).sort((a, b) => score(a) - score(b) || ageDays(b) - ageDays(a));
+}
+
+function plannerModal() {
+  const queue = plannerCandidates();
+  if (!queue.length) { toast('No hay nada que planificar: Hoy ya está decidido'); return; }
+  let i = 0;
+  const box = h('div', {});
+  openModal(box);
+
+  const planned = () => state.tasks.filter(isToday);
+
+  const decide = (fn) => { fn(); saveTasks([queue[i]]); i++; draw(); };
+
+  const draw = () => {
+    const chosen = planned();
+    const mins = sumMinutes(chosen);
+    const resumen = chosen.length + (chosen.length === 1 ? ' tarea' : ' tareas') + (mins ? ' · ' + fmtMin(mins) : '');
+
+    if (i >= queue.length) {
+      box.replaceChildren(
+        h('h3', {}, 'Plan listo'),
+        h('p', {}, 'Hoy tienes ' + resumen + '.'),
+        chosen.length > 5 ? h('p', { style: 'color: var(--warn-text); margin-top: 8px;' }, 'Son bastantes para un día. Puedes aplazar alguna desde la lista con el reloj.') : null,
+        h('div', { class: 'modal-foot' }, h('button', { class: 'btn primary', onclick: () => { closeModal(); render(); } }, 'Ver mi día')));
+      return;
+    }
+
+    const t = queue[i];
+    box.replaceChildren(
+      h('div', { class: 'plan-head' },
+        h('h3', {}, 'Planear el día'),
+        h('span', {}, (i + 1) + ' de ' + queue.length)),
+      h('div', { class: 'plan-card' },
+        h('div', { class: 'plan-title' }, t.title),
+        t.note ? h('div', { class: 'row-note' }, t.note) : null,
+        h('div', { class: 'row-meta' }, taskChips(t, { showList: true, showAge: true }))),
+      h('h4', {}, '¿Cuánto te llevará?'),
+      h('div', { class: 'inline' }, ESTIMATES.map(m =>
+        h('button', { class: 'btn small' + (t.estimateMin === m ? ' on' : ''), onclick: () => { t.estimateMin = t.estimateMin === m ? null : m; draw(); } }, fmtMin(m)))),
+      h('h4', {}, '¿Cuándo?'),
+      h('div', { class: 'plan-actions' },
+        h('button', { class: 'btn primary', onclick: () => decide(() => { t.scheduledOn = today(); }) }, icon('sun'), 'Hoy'),
+        h('button', { class: 'btn', onclick: () => decide(() => { t.scheduledOn = addDays(today(), 1); }) }, 'Mañana'),
+        nextWeekday(1) !== addDays(today(), 1)
+          ? h('button', { class: 'btn', onclick: () => decide(() => { t.scheduledOn = nextWeekday(1); }) }, 'El lunes')
+          : h('button', { class: 'btn', onclick: () => decide(() => { t.scheduledOn = addDays(today(), 7); }) }, 'En una semana'),
+        somedayCol() ? h('button', { class: 'btn', onclick: () => decide(() => { t.scheduledOn = null; t.columnId = somedayCol().id; t.position = colTasks(somedayCol().id).length; }) }, 'Algún día') : null,
+        h('button', { class: 'btn', onclick: () => { i++; draw(); } }, 'Saltar'),
+        h('button', { class: 'btn danger', onclick: async () => {
+          if (!await confirmModal('¿Borrar esta tarea?', t.title, 'Borrar')) { openModal(box); draw(); return; }
+          removeTask(t); i++; openModal(box); draw();
+        } }, icon('trash'))),
+      h('p', { class: 'plan-foot' }, 'En el plan de hoy: ' + resumen));
+  };
+  draw();
+}
+
 // ===== Vistas =====
 const VIEWS = {
   hoy: { title: 'Hoy', icon: 'sun' },
@@ -514,8 +657,10 @@ function renderHoy(view) {
   const batchRows = batchDueToday();
 
   const total = active.length + doneToday.length;
+  const mins = sumMinutes(active);
   $('#viewSub').textContent = new Date().toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' }) +
-    (total ? ' · ' + doneToday.length + ' de ' + total + ' hechas' : '');
+    (total ? ' · ' + doneToday.length + ' de ' + total + ' hechas' : '') + (mins ? ' · quedan ' + fmtMin(mins) : '');
+  $('#viewActions').append(h('button', { class: 'btn', onclick: plannerModal }, icon('wand'), 'Planear el día'));
 
   const box = h('div', { class: 'narrow' }, quickBar('Añadir una tarea para hoy…', { scheduledOn: today() }));
   if (stale.length) {
@@ -540,7 +685,12 @@ function renderHoy(view) {
         h('div', { class: 'row-meta' }, h('span', { class: 'chip recur' }, icon('stack-2'), r.n === 1 ? '1 pieza' : r.n + ' piezas'),
           r.date < today() ? h('span', { class: 'chip late' }, 'Era ' + fmtDate(r.date)) : null))));
   }
-  active.forEach(t => box.append(taskRowEl(t, { hideDate: t.scheduledOn === today(), showList: !(hoyCol() && t.columnId === hoyCol().id) })));
+  if (active.length > 5 || mins > 240) {
+    box.append(h('button', { class: 'note', onclick: plannerModal },
+      icon('alert-triangle'),
+      h('span', {}, 'Hoy va cargado: ' + active.length + ' tareas' + (mins ? ' y ' + fmtMin(mins) : '') + '. Planea el día y aplaza lo que no sea de hoy.')));
+  }
+  active.forEach(t => box.append(taskRowEl(t, { hideDate: t.scheduledOn === today(), showList: !(hoyCol() && t.columnId === hoyCol().id), actions: (task) => [snoozeButton(task)] })));
   if (!active.length && !batchRows.length) {
     box.append(doneToday.length ? emptyState('circle-check', 'Todo hecho por hoy', 'Lo que completes mañana volverá a empezar de cero.')
       : emptyState('sun', 'Nada planificado para hoy', 'Escribe una tarea arriba o abre una del tablero y ponle fecha de hoy.'));
@@ -565,7 +715,7 @@ function renderProximo(view) {
   for (const t of list) {
     const key = keyOf(t);
     if (key !== last) { box.append(h('div', { class: 'group-title' }, fmtDate(key))); last = key; }
-    box.append(taskRowEl(t, { hideDate: true, showList: true }));
+    box.append(taskRowEl(t, { hideDate: true, showList: true, actions: (task) => [snoozeButton(task)] }));
   }
   view.append(box);
 }
@@ -891,6 +1041,11 @@ function renderDetail() {
         } }, h('option', { value: '' }, 'No se repite'),
           Object.entries(RECURRENCES).map(([k, v]) => h('option', { value: k, selected: t.recurrence === k }, v)))));
   }
+  if (state.hasEstimates) {
+    fields.push(h('div', { class: 'field' }, h('span', {}, icon('clock'), 'Duración'),
+      h('div', { class: 'inline' }, ESTIMATES.map(m =>
+        h('button', { class: 'btn small' + (t.estimateMin === m ? ' on' : ''), onclick: () => { t.estimateMin = t.estimateMin === m ? null : m; save(); renderDetail(); } }, fmtMin(m))))));
+  }
   fields.push(h('div', { class: 'field' }, h('span', {}, icon('alert-triangle'), 'Urgente'),
     h('div', { class: 'inline' }, checkBtn(t.urgent, () => { t.urgent = !t.urgent; save(); renderDetail(); }, true))));
 
@@ -1065,6 +1220,7 @@ async function settingsModal() {
 
 // ===== Navegación y render =====
 function setView(v) {
+  closePopMenu();
   state.view = v;
   state.addingIn = null;
   localStorage.setItem('tareas_view', v);
@@ -1148,6 +1304,7 @@ $('#modalWrap').addEventListener('click', (e) => { if (e.target === $('#modalWra
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if ($('.popmenu')) { closePopMenu(); return; }
     if (!$('#modalWrap').hidden) closeModal(false);
     else if (state.detailId) closeDetail();
     return;

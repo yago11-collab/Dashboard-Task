@@ -6,7 +6,7 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const APP_VERSION = '14';
+const APP_VERSION = '15';
 const STALE_DAYS = 10;
 const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana' };
 const BATCH_TEMPLATES = {
@@ -804,11 +804,34 @@ function renderHoy(view) {
 
   const total = active.length + doneToday.length;
   const mins = sumMinutes(active);
-  $('#viewSub').textContent = new Date().toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' }) +
-    (total ? ' · ' + doneToday.length + ' de ' + total + ' hechas' : '') + (mins ? ' · quedan ' + fmtMin(mins) : '');
+  const agendaHoy = state.agenda.date === today() ? state.agenda.events.length : 0;
+  const agendaCount = agendaHoy;
   $('#viewActions').append(h('button', { class: 'btn', onclick: plannerModal }, icon('wand'), 'Planear el día'));
 
-  const box = h('div', { class: 'narrow' }, quickBar('Añadir una tarea para hoy…', { scheduledOn: today() }));
+  const hechas = doneToday.length;
+  const totales = active.length + hechas;
+  const pct = totales ? hechas / totales : 0;
+  const circ = 2 * Math.PI * 23;
+  const frase = !totales ? 'Sin nada planificado todavía'
+    : active.length === 0 ? 'Día terminado'
+    : 'Te ' + (active.length === 1 ? 'queda 1 tarea' : 'quedan ' + active.length + ' tareas');
+  const detalle = [
+    new Date().toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' }),
+    mins ? fmtMin(mins) : '',
+    agendaCount ? (agendaCount === 1 ? '1 evento' : agendaCount + ' eventos') : ''
+  ].filter(Boolean).join(' · ');
+
+  const box = h('div', { class: 'narrow' },
+    h('div', { class: 'day-head' },
+      h('div', { class: 'day-ring' },
+        h('svg', { viewBox: '0 0 54 54', 'aria-hidden': 'true' },
+          h('circle', { class: 'track', cx: 27, cy: 27, r: 23 }),
+          h('circle', { class: 'bar', cx: 27, cy: 27, r: 23, 'stroke-dasharray': (circ * pct).toFixed(1) + ' ' + circ.toFixed(1) })),
+        h('span', {}, totales ? hechas + '/' + totales : '0')),
+      h('div', {},
+        h('div', { class: 'day-line' }, frase),
+        h('div', { class: 'day-sub' }, detalle))),
+    quickBar('Añadir una tarea para hoy…', { scheduledOn: today() }));
   if (stale.length) {
     box.append(h('button', { class: 'side-note', style: 'margin: 0 0 8px; width: 100%;', onclick: () => setView('revision') },
       stale.length === 1 ? 'Hay 1 tarea parada desde hace más de ' + STALE_DAYS + ' días. Revísala.' :
@@ -1371,6 +1394,8 @@ const THEMES = {
     preview: { light: ['#f5f6f8', '#ffffff', '#2f7cf6', '#d3d7dd'], dark: ['#18191c', '#1c1d21', '#4a90ff', '#3d4047'] } },
   papel: { name: 'Papel', desc: 'Barra oscura y rojo, como Bear', mode: 'auto',
     preview: { light: ['#2a2b2e', '#fbfaf7', '#d9473f', '#d8d3c9'], dark: ['#151618', '#1e1f21', '#ef6a62', '#404145'] } },
+  marino: { name: 'Marino', desc: 'El azul de tu icono, con barra oscura', mode: 'auto',
+    preview: { light: ['#0b1a33', '#f7f9fd', '#1f6fe0', '#ccd6e8'], dark: ['#07101f', '#0a1526', '#4da3ff', '#2b3e5d'] } },
   foco: { name: 'Foco', desc: 'Oscuro y compacto, como Linear', mode: 'dark',
     preview: { light: ['#f3f4f6', '#fcfcfd', '#5e6ad2', '#d3d5da'], dark: ['#0b0c0e', '#101113', '#7c86e0', '#31343b'] } }
 };
@@ -1516,8 +1541,9 @@ function setView(v) {
   closePopMenu();
   state.view = v;
   state.addingIn = null;
-  localStorage.setItem('tareas_view', v);
-  render();
+  try { localStorage.setItem('tareas_view', v); } catch (e) { /* sin almacenamiento */ }
+  if (document.startViewTransition) document.startViewTransition(() => render());
+  else render();
 }
 
 function renderNav() {

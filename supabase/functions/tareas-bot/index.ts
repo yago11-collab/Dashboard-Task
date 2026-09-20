@@ -263,6 +263,17 @@ Deno.serve(async (req) => {
     }
     if (path === '/status') return json({ chat: await getChatId(), webhook: await telegram('getWebhookInfo', {}) });
     if (path === '/daily' || path === '/review') {
+      // El cron corre en UTC: se le pasa la hora y los días locales para que el cambio
+      // de horario de verano no mueva el aviso. Si no coinciden, no se manda nada.
+      const at = url.searchParams.get('at');
+      const dow = url.searchParams.get('dow');
+      if (at || dow) {
+        const parts = new Intl.DateTimeFormat('en-GB', { timeZone: TIMEZONE, hour: '2-digit', weekday: 'short', hourCycle: 'h23' }).formatToParts(new Date());
+        const hour = Number(parts.find((p) => p.type === 'hour')?.value);
+        const day = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'].indexOf(String(parts.find((p) => p.type === 'weekday')?.value).toLowerCase().slice(0, 3));
+        if (at && hour !== Number(at)) return json({ skipped: 'hora local ' + hour });
+        if (dow && !dow.split(',').map(Number).includes(day)) return json({ skipped: 'día local ' + day });
+      }
       const chat = await getChatId();
       if (!chat) return json({ error: 'Todavía no hay ningún chat conectado: escribe /start al bot' }, 400);
       const text = path === '/daily' ? await dailyMessage() : await reviewMessage();

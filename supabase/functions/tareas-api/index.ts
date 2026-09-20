@@ -130,7 +130,7 @@ async function addTask(a: Record<string, any>) {
 
 async function listTasks(a: Record<string, any>) {
   const cols = await getColumns();
-  const { data, error } = await db.from('tasks').select('*').order('position');
+  const { data, error } = await db.from('tasks').select('*').is('deleted_at', null).order('position');
   if (error) throw new Error(error.message);
   const now = today();
   const hecho = findColumn(cols, 'hecho');
@@ -154,14 +154,14 @@ async function listTasks(a: Record<string, any>) {
 
 async function findTask(a: Record<string, any>) {
   if (a.id) {
-    const { data, error } = await db.from('tasks').select('*').eq('id', a.id).maybeSingle();
+    const { data, error } = await db.from('tasks').select('*').eq('id', a.id).is('deleted_at', null).maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new Error('No existe ninguna tarea con ese id.');
     return data;
   }
   const q = String(a.title || '').trim();
   if (!q) throw new Error('Indica el id o el título de la tarea.');
-  const { data, error } = await db.from('tasks').select('*').ilike('title', `%${q.replace(/[%_]/g, '')}%`).is('completed_at', null);
+  const { data, error } = await db.from('tasks').select('*').ilike('title', `%${q.replace(/[%_]/g, '')}%`).is('completed_at', null).is('deleted_at', null);
   if (error) throw new Error(error.message);
   const rows = (data || []).filter((t) => t.priority !== 'done');
   if (!rows.length) throw new Error(`No hay ninguna tarea abierta que contenga "${q}".`);
@@ -223,7 +223,7 @@ async function updateTask(a: Record<string, any>) {
 async function deleteTask(a: Record<string, any>) {
   // Solo por id exacto: borrar por título sería demasiado fácil de equivocar
   if (!a.id) throw new Error('Para borrar hace falta el id exacto de la tarea (consúltalo con list_tasks).');
-  const { data, error } = await db.from('tasks').delete().eq('id', a.id).select('id,title');
+  const { data, error } = await db.from('tasks').update({ deleted_at: new Date().toISOString() }).eq('id', a.id).is('deleted_at', null).select('id,title');
   if (error) throw new Error(error.message);
   if (!data || !data.length) throw new Error('No existe ninguna tarea con ese id.');
   return { deleted: data[0] };
@@ -284,7 +284,7 @@ const TOOLS = [
   },
   {
     name: 'delete_task',
-    description: 'Borra definitivamente una tarea. Requiere el id exacto. Úsalo solo si Yago lo pide de forma explícita; para tareas terminadas usa complete_task.',
+    description: 'Manda una tarea a la papelera, donde se puede recuperar 30 días. Requiere el id exacto. Úsalo solo si Yago lo pide de forma explícita; para tareas terminadas usa complete_task.',
     handler: deleteTask,
     inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
   },
@@ -344,7 +344,7 @@ function icsFold(line: string): string {
 async function tasksFeed(): Promise<Response> {
   const cols = await getColumns();
   const hecho = findColumn(cols, 'hecho');
-  const { data, error } = await db.from('tasks').select('*').is('completed_at', null);
+  const { data, error } = await db.from('tasks').select('*').is('completed_at', null).is('deleted_at', null);
   if (error) throw new Error(error.message);
   const now = today();
   const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Tareas de Yago//ES', 'CALSCALE:GREGORIAN',

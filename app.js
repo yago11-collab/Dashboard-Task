@@ -6,7 +6,7 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const APP_VERSION = '10';
+const APP_VERSION = '11';
 const STALE_DAYS = 10;
 const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana' };
 const BATCH_TEMPLATES = {
@@ -24,6 +24,9 @@ const state = {
   hasNewSchema: true,
   hasBatches: true,
   hasEstimates: true,
+  hasTrash: true,
+  trash: [],
+  offline: false,
   detailId: null,
   addingIn: null,
   loadedAt: 0,
@@ -60,6 +63,21 @@ function fmtMin(n) {
   return hours + ' h' + (rest ? ' ' + rest : '');
 }
 
+// Recordatorio: hora local del día en que toca la tarea
+function remindTime(t) {
+  if (!t.remindAt) return '';
+  const d = new Date(t.remindAt);
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+function setRemind(t, hhmm) {
+  if (!hhmm) { t.remindAt = null; return; }
+  const [hh, mm] = hhmm.split(':').map(Number);
+  const base = parseISO(t.scheduledOn && t.scheduledOn >= today() ? t.scheduledOn : today());
+  base.setHours(hh, mm, 0, 0);
+  t.remindAt = base.toISOString();
+}
+
 const sumMinutes = (list) => list.reduce((total, t) => total + (t.estimateMin || 0), 0);
 
 // Próximo día de la semana (1 = lunes), siempre en el futuro
@@ -93,9 +111,12 @@ function slug(name) {
 }
 
 let toastTimer = null;
-function toast(msg, ms = 2400) {
+function toast(msg, ms = 2400, action) {
   const el = $('#toast');
-  el.textContent = msg;
+  el.replaceChildren(msg);
+  if (action) {
+    el.append(h('button', { class: 'toast-action', onclick: () => { el.classList.remove('on'); action.onclick(); } }, action.label));
+  }
   el.classList.add('on');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('on'), ms);
@@ -109,25 +130,27 @@ const somedayCol = () => colBySlug('algun-dia');
 const firstOpenCol = () => state.columns.find(c => c !== hechoCol());
 const colTasks = (colId) => state.tasks.filter(t => t.columnId === colId).sort((a, b) => a.position - b.position);
 
-// ===== Guardado: una sola cola en serie, con errores visibles =====
-let queue = Promise.resolve();
-let pending = 0;
+// ===== Guardado: cola de operaciones que sobrevive a quedarse sin conexión =====
+// Cada cambio se convierte en una operación serializable. Si no hay red, la operación
+// espera en el dispositivo y se reintenta al volver la conexión.
+const OPS_KEY = 'tareas_ops';
+const SNAPSHOT_KEY = 'tareas_datos';
+let ops = [];
+try { ops = JSON.parse(localStorage.getItem(OPS_KEY) || '[]'); } catch (e) { ops = []; }
+let flushing = false;
+
+const persistOps = () => { try { localStorage.setItem(OPS_KEY, JSON.stringify(ops)); } catch (e) { /* sin espacio */ } };
+const isNetworkError = (e) => !navigator.onLine || e instanceof TypeError ||
+  /fetch|network|failed to|timeout|conexi/i.test(String(e && e.message));
 
 function setSaveState(kind, msg) {
   const el = $('#saveState');
   el.className = 'save-state' + (kind === 'saved' ? '' : ' ' + kind);
-  $('#saveText').textContent = kind === 'saving' ? 'Guardando…' : kind === 'error' ? 'Sin guardar' : 'Guardado';
+  const pend = ops.length;
+  $('#saveText').textContent = kind === 'saving' ? 'Guardando…'
+    : kind === 'offline' ? (pend === 1 ? '1 cambio sin enviar' : pend + ' cambios sin enviar')
+    : kind === 'error' ? 'Sin guardar' : 'Guardado';
   if (kind === 'error') toast('No se ha podido guardar: ' + (msg || 'error de Supabase'), 5000);
-}
-
-function enqueue(fn) {
-  pending++;
-  setSaveState('saving');
-  queue = queue.then(fn).then(
-    () => { pending--; if (pending === 0) setSaveState('saved'); },
-    (e) => { pending--; console.error('Error de Supabase:', e); setSaveState('error', e && e.message); }
-  );
-  return queue;
 }
 
 async function run(query) {
@@ -135,6 +158,69 @@ async function run(query) {
   if (error) throw error;
   return data;
 }
+
+function addOp(op) {
+  op.tries = 0;
+  ops.push(op);
+  persistOps();
+  saveSnapshot();
+  flushOps();
+}
+
+function applyOp(op) {
+  const q = sb.from(op.table);
+  if (op.action === 'upsert') return run(q.upsert(op.rows));
+  if (op.action === 'deleteIn') return run(q.delete().in('id', op.ids));
+  return Promise.reject(new Error('Operación desconocida: ' + op.action));
+}
+
+async function flushOps() {
+  if (flushing) return;
+  if (!ops.length) { setSaveState('saved'); return; }
+  flushing = true;
+  setSaveState('saving');
+  while (ops.length) {
+    const op = ops[0];
+    try {
+      await applyOp(op);
+      ops.shift();
+      persistOps();
+    } catch (e) {
+      flushing = false;
+      if (isNetworkError(e)) { setSaveState('offline'); return; }
+      op.tries = (op.tries || 0) + 1;
+      console.error('Error de Supabase:', e);
+      if (op.tries >= 3) { ops.shift(); persistOps(); }
+      setSaveState('error', e && e.message);
+      return;
+    }
+  }
+  flushing = false;
+  setSaveState('saved');
+  state.offline = false;
+}
+
+// Copia local de los datos: permite abrir la app sin conexión
+function saveSnapshot() {
+  try {
+    localStorage.setItem(SNAPSHOT_KEY, JSON.stringify({
+      at: Date.now(), columns: state.columns, tasks: state.tasks, trash: state.trash, batches: state.batches
+    }));
+  } catch (e) { /* sin espacio */ }
+}
+
+function loadSnapshot() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SNAPSHOT_KEY) || 'null');
+    if (!raw || !raw.columns) return false;
+    state.columns = raw.columns; state.tasks = raw.tasks || []; state.trash = raw.trash || []; state.batches = raw.batches || [];
+    state.loadedAt = raw.at || 0;
+    return true;
+  } catch (e) { return false; }
+}
+
+window.addEventListener('online', () => { flushOps(); });
+window.addEventListener('offline', () => { if (ops.length) setSaveState('offline'); });
 
 function taskRow(t) {
   const row = {
@@ -154,33 +240,25 @@ function taskRow(t) {
     row.completed_at = t.completedAt;
   }
   if (state.hasEstimates) row.estimate_min = t.estimateMin;
+  if (state.hasTrash) { row.deleted_at = t.deletedAt; row.remind_at = t.remindAt; }
   return row;
 }
 
 function saveTasks(list) {
   const rows = [...new Set(list)].map(taskRow);
-  if (rows.length) enqueue(() => run(sb.from('tasks').upsert(rows)));
+  if (rows.length) addOp({ table: 'tasks', action: 'upsert', rows });
 }
 
 function saveColumns() {
-  const rows = state.columns.map(c => ({ id: c.id, title: c.title, position: c.position }));
-  enqueue(() => run(sb.from('columns').upsert(rows)));
+  addOp({ table: 'columns', action: 'upsert', rows: state.columns.map(c => ({ id: c.id, title: c.title, position: c.position })) });
 }
 
 function deleteTasks(ids) {
-  return enqueue(async () => {
-    for (let i = 0; i < ids.length; i += 50) {
-      await run(sb.from('tasks').delete().in('id', ids.slice(i, i + 50)));
-    }
-  });
+  for (let i = 0; i < ids.length; i += 50) addOp({ table: 'tasks', action: 'deleteIn', ids: ids.slice(i, i + 50) });
 }
 
-const saveBatch = (b) => enqueue(() => run(sb.from('batches').upsert({
-  id: b.id, title: b.title, stages: b.stages, stage_dates: b.stageDates, position: b.position
-})));
-const saveItems = (items) => enqueue(() => run(sb.from('batch_items').upsert(items.map(i => ({
-  id: i.id, batch_id: i.batchId, title: i.title, stage: i.stage, position: i.position
-})))));
+const saveBatch = (b) => addOp({ table: 'batches', action: 'upsert', rows: [{ id: b.id, title: b.title, stages: b.stages, stage_dates: b.stageDates, position: b.position }] });
+const saveItems = (items) => addOp({ table: 'batch_items', action: 'upsert', rows: items.map(i => ({ id: i.id, batch_id: i.batchId, title: i.title, stage: i.stage, position: i.position })) });
 
 // Renumera una columna y devuelve las tareas cuya posición ha cambiado
 function renumber(colId) {
@@ -208,6 +286,8 @@ function fromRow(r, migrated) {
     lastDoneOn: r.last_done_on || null,
     completedAt: r.completed_at || null,
     estimateMin: r.estimate_min || null,
+    deletedAt: r.deleted_at || null,
+    remindAt: r.remind_at || null,
     createdAt: r.created_at || null
   };
   // Prefijos antiguos (!!! urgente, >>> recurrente): se convierten en campos reales
@@ -232,13 +312,17 @@ async function loadAll() {
   state.hasBatches = !probeBatches.error;
   const probeEstimate = await sb.from('tasks').select('estimate_min').limit(1);
   state.hasEstimates = !probeEstimate.error;
+  const probeTrash = await sb.from('tasks').select('deleted_at').limit(1);
+  state.hasTrash = !probeTrash.error;
 
   const cols = await run(sb.from('columns').select('*').order('position'));
   const rows = await run(sb.from('tasks').select('*').order('position'));
 
   state.columns = cols.map(c => ({ id: c.id, title: c.title, position: c.position || 0 }));
   const migrated = [];
-  state.tasks = rows.filter(r => state.columns.some(c => c.id === r.column_id)).map(r => fromRow(r, migrated));
+  const all = rows.filter(r => state.columns.some(c => c.id === r.column_id)).map(r => fromRow(r, migrated));
+  state.tasks = all.filter(t => !t.deletedAt);
+  state.trash = all.filter(t => t.deletedAt).sort((a, b) => (b.deletedAt || '').localeCompare(a.deletedAt || ''));
 
   // Las recurrentes que estaban en Hecho vuelven a la primera lista
   const hecho = hechoCol(), first = firstOpenCol();
@@ -373,17 +457,53 @@ function createTask(fields) {
     id: uuid(), title: fields.title, note: '', columnId: colId, position: colTasks(colId).length,
     checked: false, urgent: !!fields.urgent, subtasks: [],
     scheduledOn: fields.scheduledOn || null, deadlineOn: null, recurrence: fields.recurrence || null,
-    lastDoneOn: null, completedAt: null, estimateMin: fields.estimateMin || null, createdAt: new Date().toISOString()
+    lastDoneOn: null, completedAt: null, estimateMin: fields.estimateMin || null,
+    deletedAt: null, remindAt: fields.remindAt || null, createdAt: new Date().toISOString()
   };
   state.tasks.push(t);
   saveTasks([t]);
   return t;
 }
 
+// Borrar aparta la tarea a la papelera; se vacía sola a los 30 días
+function trashTasks(list, mensaje) {
+  const ids = new Set(list.map(t => t.id));
+  const cols = new Set(list.map(t => t.columnId));
+  const stamp = new Date().toISOString();
+  list.forEach(t => { t.deletedAt = stamp; });
+  state.tasks = state.tasks.filter(t => !ids.has(t.id));
+  state.trash = [...list, ...state.trash];
+  const moved = [];
+  cols.forEach(id => moved.push(...renumber(id)));
+  if (state.hasTrash) saveTasks([...list, ...moved]);
+  else { deleteTasks([...ids]); saveTasks(moved); }
+  render();
+  toast(mensaje, 7000, state.hasTrash ? { label: 'Deshacer', onclick: () => restoreTasks(list) } : null);
+}
+
+function restoreTasks(list) {
+  const ids = new Set(list.map(t => t.id));
+  state.trash = state.trash.filter(t => !ids.has(t.id));
+  list.forEach(t => {
+    t.deletedAt = null;
+    if (!state.columns.some(c => c.id === t.columnId)) t.columnId = (firstOpenCol() || state.columns[0]).id;
+    t.position = colTasks(t.columnId).length;
+    state.tasks.push(t);
+  });
+  saveTasks(list);
+  render();
+  toast(list.length === 1 ? 'Tarea recuperada' : list.length + ' tareas recuperadas');
+}
+
+function purgeTasks(list) {
+  const ids = new Set(list.map(t => t.id));
+  state.trash = state.trash.filter(t => !ids.has(t.id));
+  deleteTasks([...ids]);
+  render();
+}
+
 function removeTask(t) {
-  state.tasks = state.tasks.filter(o => o !== t);
-  deleteTasks([t.id]);
-  saveTasks(renumber(t.columnId));
+  trashTasks([t], 'Tarea borrada');
 }
 
 async function clearDone() {
@@ -391,12 +511,8 @@ async function clearDone() {
   const done = state.tasks.filter(t => (t.checked || (hecho && t.columnId === hecho.id)) && !t.recurrence);
   if (!done.length) { toast('No hay tareas completadas que borrar'); return; }
   const label = done.length === 1 ? '1 tarea completada' : done.length + ' tareas completadas';
-  if (!await confirmModal('¿Borrar ' + label + '?', 'No se puede deshacer.', 'Borrar')) return;
-  const ids = new Set(done.map(t => t.id));
-  state.tasks = state.tasks.filter(t => !ids.has(t.id));
-  deleteTasks([...ids]);
-  render();
-  toast('Borradas ' + label);
+  if (!await confirmModal('¿Borrar ' + label + '?', state.hasTrash ? 'Van a la papelera y se borran solas a los 30 días.' : 'No se puede deshacer.', 'Borrar')) return;
+  trashTasks(done, 'Borradas ' + label);
 }
 
 // ===== Alta rápida en lenguaje natural =====
@@ -430,6 +546,11 @@ function parseQuick(text) {
     if (iso(d) < today()) d = new Date(now.getFullYear() + 1, Number(m[2]) - 1, Number(m[1]));
     out.scheduledOn = iso(d);
   });
+  take(/\s(?:a las\s)?(\d{1,2})[:.](\d{2})(?=\s)/, (m) => {
+    const hh = Number(m[1]), mm = Number(m[2]);
+    if (hh > 23 || mm > 59) return false;
+    out.remindHM = String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
+  });
   take(/\s#([\p{L}\d-]+)(?=\s)/u, (m) => {
     const tag = slug(m[1]);
     const col = state.columns.find(c => slug(c.title).startsWith(tag)) || state.columns.find(c => slug(c.title).includes(tag));
@@ -453,8 +574,9 @@ function quickAdd(text, defaults) {
   }
   const t = createTask(p);
   if (!t) return;
+  if (p.remindHM && state.hasTrash) { setRemind(t, p.remindHM); saveTasks([t]); }
   const col = state.columns.find(c => c.id === t.columnId);
-  toast('Añadida a ' + col.title + (t.scheduledOn ? ' · ' + fmtDate(t.scheduledOn) : ''));
+  toast('Añadida a ' + col.title + (t.scheduledOn ? ' · ' + fmtDate(t.scheduledOn) : '') + (t.remindAt ? ' · aviso a las ' + remindTime(t) : ''));
   render();
   const input = $('#quickInput');
   if (input) input.focus();
@@ -475,6 +597,7 @@ function taskChips(t, opts = {}) {
   }
   if (t.recurrence) chips.push(h('span', { class: 'chip recur' }, icon('repeat'), RECURRENCES[t.recurrence] || t.recurrence));
   if (t.estimateMin) chips.push(h('span', { class: 'chip' }, icon('clock'), fmtMin(t.estimateMin)));
+  if (t.remindAt && !t.checked) chips.push(h('span', { class: 'chip recur' }, icon('bell'), remindTime(t)));
   if (t.subtasks.length) chips.push(h('span', { class: 'chip' }, icon('list-check'), t.subtasks.filter(s => s.checked).length + '/' + t.subtasks.length));
   if (opts.showList) {
     const col = state.columns.find(c => c.id === t.columnId);
@@ -636,7 +759,8 @@ const VIEWS = {
   tablero: { title: 'Tablero', icon: 'layout-kanban' },
   lotes: { title: 'Lotes', icon: 'stack-2' },
   revision: { title: 'Revisión', icon: 'eye-check', hidden: true },
-  hecho: { title: 'Hecho', icon: 'archive' }
+  hecho: { title: 'Hecho', icon: 'archive' },
+  papelera: { title: 'Papelera', icon: 'trash', hidden: true }
 };
 
 function batchDueToday() {
@@ -736,7 +860,7 @@ function renderRevision(view) {
     state.hasNewSchema ? act('Hoy', () => { t.scheduledOn = today(); saveTasks([t]); render(); }) : null,
     state.hasNewSchema ? act('+1 semana', () => { t.scheduledOn = addDays(today(), 7); saveTasks([t]); render(); }) : null,
     someday ? act('Algún día', () => moveTask(t, someday.id)) : null,
-    h('button', { class: 'btn small danger', onclick: (e) => { e.stopPropagation(); removeTask(t); render(); toast('Tarea borrada'); } }, 'Borrar')
+    h('button', { class: 'btn small danger', onclick: (e) => { e.stopPropagation(); removeTask(t); } }, 'Borrar')
   ] })));
   view.append(box);
 }
@@ -750,6 +874,34 @@ function renderHecho(view) {
   const box = h('div', { class: 'narrow' });
   if (!list.length) box.append(emptyState('archive', 'Todavía no hay nada hecho', 'Lo que completes se guarda aquí hasta que lo borres.'));
   list.forEach(t => box.append(taskRowEl(t)));
+  view.append(box);
+}
+
+function renderPapelera(view) {
+  const list = state.trash;
+  $('#viewSub').textContent = list.length
+    ? list.length + (list.length === 1 ? ' tarea borrada' : ' tareas borradas') + ' · se vacía sola a los 30 días'
+    : 'Lo que borres se guarda aquí 30 días por si te arrepientes';
+  if (list.length) {
+    $('#viewActions').append(h('button', { class: 'btn danger', onclick: async () => {
+      if (!await confirmModal('¿Vaciar la papelera?', list.length + ' tareas se borrarán para siempre.', 'Vaciar')) return;
+      purgeTasks([...list]);
+      toast('Papelera vacía');
+    } }, icon('trash'), 'Vaciar papelera'));
+  }
+  const box = h('div', { class: 'narrow' });
+  if (!list.length) box.append(emptyState('trash', 'La papelera está vacía', 'Nada que recuperar.'));
+  list.forEach(t => {
+    const dias = t.deletedAt ? Math.max(0, 30 - daysBetween(iso(new Date(t.deletedAt)), today())) : 30;
+    box.append(h('div', { class: 'row' },
+      h('span', { class: 'check', style: 'border-style: dashed;' }),
+      h('div', { class: 'row-main' },
+        h('div', { class: 'row-title' }, t.title),
+        h('div', { class: 'row-meta' }, h('span', { class: 'chip' }, 'quedan ' + dias + ' días'))),
+      h('div', { class: 'row-actions' },
+        h('button', { class: 'btn small', onclick: () => restoreTasks([t]) }, 'Recuperar'),
+        h('button', { class: 'btn small danger', onclick: () => { purgeTasks([t]); toast('Borrada para siempre'); } }, 'Borrar'))));
+  });
   view.append(box);
 }
 
@@ -803,7 +955,7 @@ function columnEl(c) {
       if (!await confirmModal('¿Eliminar la lista “' + c.title + '”?', 'Está vacía.', 'Eliminar')) return;
       state.columns = state.columns.filter(o => o !== c);
       state.columns.forEach((o, i) => { o.position = i; });
-      enqueue(() => run(sb.from('columns').delete().eq('id', c.id)));
+      addOp({ table: 'columns', action: 'deleteIn', ids: [c.id] });
       saveColumns(); render();
     } }, icon('x')) : null
   );
@@ -931,7 +1083,7 @@ function batchEl(b) {
     grid.append(h('div', { class: 'piece' }, label,
       h('button', { class: 'icon-btn', title: 'Quitar pieza', onclick: () => {
         b.items = b.items.filter(o => o !== item);
-        enqueue(() => run(sb.from('batch_items').delete().eq('id', item.id)));
+        addOp({ table: 'batch_items', action: 'deleteIn', ids: [item.id] });
         render();
       } }, icon('x'))));
     b.stages.forEach((name, k) => {
@@ -958,7 +1110,7 @@ function batchEl(b) {
       h('button', { class: 'icon-btn', title: 'Eliminar lote', onclick: async () => {
         if (!await confirmModal('¿Eliminar el lote “' + b.title + '”?', 'Se borran también sus piezas. No se puede deshacer.', 'Eliminar')) return;
         state.batches = state.batches.filter(o => o !== b);
-        enqueue(() => run(sb.from('batches').delete().eq('id', b.id)));
+        addOp({ table: 'batches', action: 'deleteIn', ids: [b.id] });
         render();
       } }, icon('trash'))),
     h('div', { class: 'batch-scroll' }, grid),
@@ -1046,6 +1198,13 @@ function renderDetail() {
         } }, h('option', { value: '' }, 'No se repite'),
           Object.entries(RECURRENCES).map(([k, v]) => h('option', { value: k, selected: t.recurrence === k }, v)))));
   }
+  if (state.hasTrash) {
+    fields.push(h('div', { class: 'field' }, h('span', {}, icon('bell'), 'Recordatorio'),
+      h('div', { class: 'inline' },
+        h('input', { type: 'time', value: remindTime(t), onchange: (e) => { setRemind(t, e.target.value); save(); renderDetail(); } }),
+        t.remindAt ? h('button', { class: 'btn small', onclick: () => { t.remindAt = null; save(); renderDetail(); } }, 'Quitar') : null,
+        h('span', { style: 'font-size: 12px; color: var(--text-3);' }, 'te avisa el bot de Telegram'))));
+  }
   if (state.hasEstimates) {
     fields.push(h('div', { class: 'field' }, h('span', {}, icon('clock'), 'Duración'),
       h('div', { class: 'inline' }, ESTIMATES.map(m =>
@@ -1084,7 +1243,7 @@ function renderDetail() {
       h('span', { class: 'spacer' }),
       h('button', { class: 'icon-btn', title: 'Borrar tarea', onclick: async () => {
         if (!await confirmModal('¿Borrar esta tarea?', t.title, 'Borrar')) return;
-        removeTask(t); closeDetail(); toast('Tarea borrada');
+        removeTask(t); closeDetail();
       } }, icon('trash')),
       h('button', { class: 'icon-btn', title: 'Cerrar', onclick: closeDetail }, icon('x'))),
     h('div', { class: 'drawer-body' }, title, note, fields,
@@ -1177,6 +1336,36 @@ function appearanceSection() {
   return wrap;
 }
 
+// ===== Búsqueda =====
+function searchModal() {
+  const input = h('input', { type: 'text', placeholder: 'Buscar en tus tareas…', autocomplete: 'off' });
+  const results = h('div', { class: 'search-results' });
+  const box = h('div', {}, h('h3', {}, 'Buscar'), input, results);
+  openModal(box);
+  input.focus();
+
+  const draw = () => {
+    const q = slug(input.value.trim());
+    if (!q) { results.replaceChildren(h('p', { class: 'search-hint' }, 'Escribe para buscar en el título, la nota y las subtareas. Busca también en lo hecho y en la papelera.')); return; }
+    const match = (t) => slug([t.title, t.note, ...(t.subtasks || []).map(x => x.text)].join(' ')).includes(q);
+    const found = [...state.tasks.filter(match), ...state.trash.filter(match)].slice(0, 30);
+    if (!found.length) { results.replaceChildren(h('p', { class: 'search-hint' }, 'Nada coincide con “' + input.value.trim() + '”.')); return; }
+    results.replaceChildren(...found.map(t => {
+      const col = state.columns.find(c => c.id === t.columnId);
+      const estado = t.deletedAt ? 'Papelera' : t.checked ? 'Hecho' : (col ? col.title : '');
+      return h('button', { class: 'search-item', onclick: () => {
+        closeModal();
+        if (t.deletedAt) { setView('papelera'); return; }
+        openDetail(t.id);
+      } },
+        h('span', { class: 'search-title' + (t.checked || t.deletedAt ? ' off' : '') }, t.title),
+        h('span', { class: 'search-meta' }, [estado, t.scheduledOn ? fmtDate(t.scheduledOn) : ''].filter(Boolean).join(' · ')));
+    }));
+  };
+  input.addEventListener('input', draw);
+  draw();
+}
+
 // ===== Ajustes =====
 async function settingsModal() {
   const urls = h('textarea', { placeholder: 'https://calendar.google.com/calendar/ical/…/basic.ics', style: 'min-height: 90px; font-size: 12.5px;' });
@@ -1188,8 +1377,9 @@ async function settingsModal() {
     appearanceSection(),
     h('h4', {}, 'Aplicación'),
     h('div', { style: 'display: flex; align-items: center; gap: 10px; flex-wrap: wrap;' },
-      h('button', { class: 'btn', onclick: () => {
-        // Recarga saltándose la caché: el navegador vuelve a pedir la página y sus archivos
+      h('button', { class: 'btn', onclick: async () => {
+        // Tira la copia local de la app y vuelve a pedirla entera
+        try { if (window.caches) for (const k of await caches.keys()) await caches.delete(k); } catch (e) { /* da igual */ }
         location.replace(location.pathname + '?v=' + Date.now());
       } }, icon('refresh'), 'Buscar actualizaciones'),
       h('span', { style: 'font-size: 12.5px; color: var(--text-3);' }, 'Versión ' + APP_VERSION)),
@@ -1254,6 +1444,8 @@ function renderNav() {
     item('hoy'), item('proximo'), item('tablero'), item('lotes'),
     h('div', { class: 'nav-sep' }),
     item('hecho'),
+    state.trash.length ? h('button', { class: 'nav-item' + (state.view === 'papelera' ? ' on' : ''), onclick: () => setView('papelera') },
+      icon('trash'), 'Papelera', h('span', { class: 'count' }, state.trash.length)) : null,
     stale ? h('button', { class: 'side-note', onclick: () => setView('revision') },
       'Revisión: ' + (stale === 1 ? '1 tarea lleva' : stale + ' tareas llevan') + ' más de ' + STALE_DAYS + ' días parada' + (stale === 1 ? '' : 's')) : null,
     h('div', { class: 'side-foot' },
@@ -1277,11 +1469,15 @@ function render() {
   $('#viewActions').replaceChildren();
 
   const banner = $('#schemaBanner');
-  banner.hidden = state.hasNewSchema && state.hasBatches;
-  banner.textContent = 'Falta actualizar la base de datos: las fechas, las repeticiones y los lotes no se guardarán hasta ejecutar supabase/migracion-2026-09.sql en Supabase.';
+  const faltaEsquema = !(state.hasNewSchema && state.hasBatches && state.hasTrash);
+  banner.hidden = !state.offline && !faltaEsquema;
+  banner.textContent = state.offline
+    ? 'Sin conexión. Puedes seguir trabajando: los cambios se guardan aquí y se envían solos al volver la red.'
+    : 'Falta actualizar la base de datos: hay campos nuevos que todavía no se guardan.';
 
+  $('#viewActions').append(h('button', { class: 'icon-btn', title: 'Buscar (/)', 'aria-label': 'Buscar', onclick: searchModal }, icon('search')));
   $('#viewActions').append(h('button', { class: 'icon-btn only-mobile', title: 'Ajustes', 'aria-label': 'Ajustes', onclick: settingsModal }, icon('settings')));
-  ({ hoy: renderHoy, proximo: renderProximo, tablero: renderTablero, lotes: renderLotes, revision: renderRevision, hecho: renderHecho })[state.view](view);
+  ({ hoy: renderHoy, proximo: renderProximo, tablero: renderTablero, lotes: renderLotes, revision: renderRevision, hecho: renderHecho, papelera: renderPapelera })[state.view](view);
   renderNav();
   view.scrollTop = scroll;
   if (view.querySelector('.board')) view.querySelector('.board').scrollLeft = boardScroll;
@@ -1291,11 +1487,21 @@ function render() {
 async function start() {
   try {
     await loadAll();
+    state.offline = false;
+    saveSnapshot();
     render();
     loadAgenda();
+    flushOps();
   } catch (e) {
     console.error(e);
-    $('#view').replaceChildren(h('p', { class: 'empty' }, 'No se han podido cargar las tareas: ' + (e.message || 'error de conexión') + '. Recarga la página.'));
+    if (loadSnapshot()) {
+      // Sin conexión: se trabaja sobre la última copia y los cambios esperan en la cola
+      state.offline = true;
+      render();
+      toast('Sin conexión. Estás viendo la última copia guardada.', 5000);
+    } else {
+      $('#view').replaceChildren(h('p', { class: 'empty' }, 'No se han podido cargar las tareas: ' + (e.message || 'error de conexión') + '. Recarga la página.'));
+    }
   }
 }
 
@@ -1322,6 +1528,11 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+  if ((e.key === '/' || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k')) && !typing && $('#modalWrap').hidden) {
+    e.preventDefault();
+    searchModal();
+    return;
+  }
   if (e.key.toLowerCase() === 'n' && !typing && !e.metaKey && !e.ctrlKey && !e.altKey && $('#modalWrap').hidden && !state.detailId) {
     e.preventDefault();
     if (!$('#quickInput')) setView('hoy');
@@ -1331,7 +1542,7 @@ document.addEventListener('keydown', (e) => {
 
 // Al volver a la app, recarga lo que haya cambiado fuera (otro dispositivo, Claude, ChatGPT)
 document.addEventListener('visibilitychange', async () => {
-  const idle = pending === 0 && !state.detailId && $('#modalWrap').hidden && !state.addingIn &&
+  const idle = ops.length === 0 && !state.detailId && $('#modalWrap').hidden && !state.addingIn &&
     !/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
   if (document.visibilityState !== 'visible' || !idle || Date.now() - state.loadedAt < 30000) return;
   const { data: { session } } = await sb.auth.getSession();
@@ -1339,7 +1550,11 @@ document.addEventListener('visibilitychange', async () => {
   try { await loadAll(); render(); loadAgenda(); } catch (e) { console.error(e); }
 });
 
-window.addEventListener('beforeunload', (e) => { if (pending > 0) { e.preventDefault(); e.returnValue = ''; } });
+window.addEventListener('beforeunload', (e) => { if (ops.length && navigator.onLine) { e.preventDefault(); e.returnValue = ''; } });
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(e => console.warn('Sin copia local:', e)));
+}
 
 (async () => {
   const { data: { session } } = await sb.auth.getSession();

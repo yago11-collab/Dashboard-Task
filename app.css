@@ -671,3 +671,15 @@ h1 { text-wrap: balance; }
 .plan-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .plan-foot { margin-top: 16px; font-size: 12.5px; color: var(--text-3); }
 .modal .inline { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* ===== Deshacer, búsqueda y papelera ===== */
+.toast { display: inline-flex; align-items: center; gap: 14px; }
+.toast-action { color: var(--bg); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; font-size: 13px; }
+.modal input[type=time] { padding: 6px 9px; border: 1px solid var(--border-2); border-radius: 8px; background: var(--bg); outline: none; }
+.search-results { margin-top: 12px; max-height: 50vh; overflow-y: auto; }
+.search-hint { color: var(--text-3); font-size: 13px; padding: 10px 2px; }
+.search-item { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; padding: 9px 10px; border-radius: 8px; }
+.search-item:hover { background: var(--bg-hover); }
+.search-title { font-size: 14px; color: var(--text); }
+.search-title.off { color: var(--text-3); text-decoration: line-through; }
+.search-meta { font-size: 12px; color: var(--text-3); }

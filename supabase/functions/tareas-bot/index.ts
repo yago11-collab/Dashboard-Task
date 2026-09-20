@@ -151,6 +151,29 @@ async function reviewMessage(): Promise<string> {
     '\n\nDecide con cada una: ponle fecha desde la app, o escríbeme <b>hecho &lt;texto&gt;</b> si ya la hiciste.';
 }
 
+// Avisos de tareas con hora: se mandan una vez y se borra la hora para no repetirlos
+async function sendReminders(): Promise<number> {
+  const chat = await getChatId();
+  if (!chat) return 0;
+  const now = new Date();
+  const desde = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+  const { data, error } = await db.from('tasks')
+    .select('id,title,remind_at,estimate_min')
+    .is('deleted_at', null)
+    .is('completed_at', null)
+    .not('remind_at', 'is', null)
+    .lte('remind_at', now.toISOString())
+    .gte('remind_at', desde);
+  if (error) throw new Error(error.message);
+  const pend = data || [];
+  for (const t of pend) {
+    const hora = new Date(t.remind_at).toLocaleTimeString('es-ES', { timeZone: TIMEZONE, hour: '2-digit', minute: '2-digit' });
+    await send(chat, `⏰ <b>${escapeHtml(t.title)}</b>\nEra para las ${hora}.` + (t.estimate_min ? ` (${fmtMin(t.estimate_min)})` : ''));
+    await db.from('tasks').update({ remind_at: null }).eq('id', t.id);
+  }
+  return pend.length;
+}
+
 // ===== Mensajes del bot =====
 async function handleMessage(chatId: string, text: string) {
   const bound = await getChatId();
@@ -262,6 +285,7 @@ Deno.serve(async (req) => {
       return json({ ok: true, bot: me.username, webhook: hook, chat: await getChatId() });
     }
     if (path === '/status') return json({ chat: await getChatId(), webhook: await telegram('getWebhookInfo', {}) });
+    if (path === '/reminders') return json({ ok: true, sent: await sendReminders() });
     if (path === '/daily' || path === '/review') {
       // El cron corre en UTC: se le pasa la hora y los días locales para que el cambio
       // de horario de verano no mueva el aviso. Si no coinciden, no se manda nada.

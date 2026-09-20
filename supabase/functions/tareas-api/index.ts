@@ -47,8 +47,13 @@ function parseDate(value?: string | null): string | null {
   throw new Error(`Fecha no reconocida: "${value}". Usa AAAA-MM-DD, hoy, mañana o un día de la semana.`);
 }
 
-function nextOccurrence(recurrence: string): string {
-  if (recurrence === 'weekly') return addDays(today(), 7);
+// Semanal se ancla al día que tenía puesto; diaria y laborables, al día siguiente
+function nextOccurrence(recurrence: string, from?: string | null): string {
+  if (recurrence === 'weekly') {
+    let next = addDays(from || today(), 7);
+    while (next <= today()) next = addDays(next, 7);
+    return next;
+  }
   let next = addDays(today(), 1);
   if (recurrence === 'weekdays') while ([0, 6].includes(weekday(next))) next = addDays(next, 1);
   return next;
@@ -177,7 +182,7 @@ async function completeTask(a: Record<string, any>) {
     let subtasks = [];
     try { subtasks = t.subtasks_data ? JSON.parse(t.subtasks_data) : []; } catch { /* sin subtareas */ }
     subtasks.forEach((s: any) => { s.checked = false; });
-    patch = { last_done_on: today(), scheduled_on: nextOccurrence(t.recurrence), subtasks_data: subtasks.length ? JSON.stringify(subtasks) : null };
+    patch = { last_done_on: today(), scheduled_on: nextOccurrence(t.recurrence, t.scheduled_on), subtasks_data: subtasks.length ? JSON.stringify(subtasks) : null };
   } else {
     patch = { priority: 'done', completed_at: new Date().toISOString() };
     const hecho = findColumn(cols, 'hecho');

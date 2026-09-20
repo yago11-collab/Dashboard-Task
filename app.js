@@ -6,7 +6,7 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const APP_VERSION = '11';
+const APP_VERSION = '12';
 const STALE_DAYS = 10;
 const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana' };
 const BATCH_TEMPLATES = {
@@ -298,7 +298,7 @@ function fromRow(r, migrated) {
     if (recur) {
       t.title = t.title.slice(recur[0].length);
       t.recurrence = t.recurrence || 'daily';
-      if (t.checked) { t.checked = false; t.completedAt = null; t.lastDoneOn = today(); t.scheduledOn = nextOccurrence(t.recurrence); }
+      if (t.checked) { t.checked = false; t.completedAt = null; t.lastDoneOn = today(); t.scheduledOn = nextOccurrence(t); }
       migrated.push(t);
     }
   }
@@ -372,10 +372,15 @@ async function loadAgenda() {
 }
 
 // ===== Reglas de negocio =====
-function nextOccurrence(recurrence) {
-  if (recurrence === 'weekly') return addDays(today(), 7);
+// La próxima vez que toca. Semanal se ancla al día que tenía puesto (los lunes siguen siendo lunes)
+function nextOccurrence(t) {
+  if (t.recurrence === 'weekly') {
+    let next = addDays(t.scheduledOn || today(), 7);
+    while (next <= today()) next = addDays(next, 7);
+    return next;
+  }
   let next = addDays(today(), 1);
-  if (recurrence === 'weekdays') {
+  if (t.recurrence === 'weekdays') {
     while ([0, 6].includes(parseISO(next).getDay())) next = addDays(next, 1);
   }
   return next;
@@ -414,7 +419,7 @@ function toggleTask(t) {
   } else if (!t.checked && t.recurrence && state.hasNewSchema) {
     // Una recurrente no se archiva: se marca como hecha hoy y vuelve en su próxima fecha
     t.lastDoneOn = today();
-    t.scheduledOn = nextOccurrence(t.recurrence);
+    t.scheduledOn = nextOccurrence(t);
     t.subtasks.forEach(s => { s.checked = false; });
     toast('Hecha. Vuelve ' + fmtDate(t.scheduledOn));
   } else {

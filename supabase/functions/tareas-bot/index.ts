@@ -1,0 +1,276 @@
+// Bot de Telegram del planificador. Es una capa fina sobre la función tareas-api.
+//
+//   POST /tareas-bot/k/<clave>/setup    registra el webhook en Telegram (lo llamo yo una vez)
+//   POST /tareas-bot/webhook            mensajes del bot (Telegram lo llama; valida cabecera secreta)
+//   POST /tareas-bot/k/<clave>/daily    manda el plan del día (lo llama el cron de la base de datos)
+//   POST /tareas-bot/k/<clave>/review   manda la revisión de tareas paradas
+//
+// Secretos: TAREAS_API_KEY (la misma de tareas-api) y TELEGRAM_BOT_TOKEN.
+// El chat autorizado se guarda solo la primera vez que se escribe /start.
+
+import { createClient } from 'npm:@supabase/supabase-js@2';
+
+const db = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
+const API_KEY = Deno.env.get('TAREAS_API_KEY') ?? '';
+const BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') ?? '';
+const API = `${Deno.env.get('SUPABASE_URL')}/functions/v1/tareas-api`;
+const TIMEZONE = 'Europe/Madrid';
+const CHAT_KEY = 'telegram_chat_id';
+
+const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: TIMEZONE }).format(new Date());
+const addDays = (iso: string, n: number) => {
+  const d = new Date(iso + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+const weekday = (iso: string) => new Date(iso + 'T12:00:00Z').getUTCDay();
+const WEEKDAYS = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
+const slug = (s: string) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+function fmtDate(iso: string): string {
+  const diff = Math.round((new Date(iso + 'T12:00:00Z').getTime() - new Date(today() + 'T12:00:00Z').getTime()) / 86400000);
+  if (diff === 0) return 'hoy';
+  if (diff === 1) return 'mañana';
+  if (diff === -1) return 'ayer';
+  if (diff < 0) return `hace ${-diff} días`;
+  return new Date(iso + 'T12:00:00Z').toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }).replace(/\./g, '');
+}
+
+const fmtMin = (n: number) => n < 60 ? `${n} min` : `${Math.floor(n / 60)} h${n % 60 ? ' ' + (n % 60) : ''}`;
+
+// Llama a la API del planificador con la clave
+async function api(path: string, body: unknown = {}) {
+  const res = await fetch(API + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + API_KEY },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Error ' + res.status);
+  return data;
+}
+
+async function telegram(method: string, payload: unknown) {
+  const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!data.ok) throw new Error(data.description || 'Telegram: error ' + res.status);
+  return data.result;
+}
+
+async function getChatId(): Promise<string | null> {
+  const { data } = await db.from('app_settings').select('value').eq('key', CHAT_KEY).maybeSingle();
+  return data?.value || null;
+}
+
+const send = async (chat: string, text: string) => telegram('sendMessage', { chat_id: chat, text, parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
+
+// ===== Entender lo que se escribe =====
+// Mismo criterio que el alta rápida de la app: fecha, urgencia y lista en la propia frase.
+function parseTask(text: string) {
+  let t = ' ' + text.trim() + ' ';
+  const out: Record<string, unknown> = {};
+  const take = (re: RegExp, fn: (m: RegExpMatchArray) => boolean | void) => {
+    const m = t.match(re);
+    if (m && fn(m) !== false) t = t.replace(m[0], ' ');
+  };
+  take(/\s(!{1,3}|urgente)(?=\s)/i, () => { out.urgent = true; });
+  take(/\scada d[ií]a(?=\s)/i, () => { out.recurrence = 'daily'; });
+  take(/\scada semana(?=\s)/i, () => { out.recurrence = 'weekly'; });
+  take(/\s(d[ií]as )?laborables(?=\s)/i, () => { out.recurrence = 'weekdays'; });
+  take(/\spasado ma[ñn]ana(?=\s)/i, () => { out.when = addDays(today(), 2); });
+  take(/\sma[ñn]ana(?=\s)/i, () => { if (out.when) return false; out.when = addDays(today(), 1); });
+  take(/\shoy(?=\s)/i, () => { if (out.when) return false; out.when = today(); });
+  take(/\s(?:el )?(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)(?=\s)/i, (m) => {
+    if (out.when) return false;
+    const target = WEEKDAYS.indexOf(slug(m[1]));
+    let d = addDays(today(), 1);
+    while (weekday(d) !== target) d = addDays(d, 1);
+    out.when = d;
+  });
+  take(/\s(?:el )?(\d{1,2})\/(\d{1,2})(?=\s)/, (m) => {
+    if (out.when) return false;
+    const now = new Date();
+    let d = `${now.getFullYear()}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
+    if (d < today()) d = `${now.getFullYear() + 1}${d.slice(4)}`;
+    out.when = d;
+  });
+  take(/\s#([\p{L}\d-]+)(?=\s)/u, (m) => { out.list = m[1]; });
+  out.title = t.replace(/\s+/g, ' ').trim();
+  return out;
+}
+
+function taskLine(t: Record<string, any>, i: number): string {
+  const detalle = [
+    t.deadline ? `vence ${fmtDate(t.deadline)}` : '',
+    t.when && t.when < today() ? `desde ${fmtDate(t.when)}` : '',
+    t.estimate_min ? fmtMin(t.estimate_min) : '',
+  ].filter(Boolean).join(' · ');
+  return `${i + 1}. ${t.urgent ? '❗ ' : ''}${escapeHtml(t.title)}${detalle ? ` <i>(${escapeHtml(detalle)})</i>` : ''}`;
+}
+
+const escapeHtml = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+async function agendaLines(): Promise<string> {
+  try {
+    const res = await fetch(`${API}/k/${API_KEY}/calendar?from=${today()}&to=${today()}`);
+    if (!res.ok) return '';
+    const data = await res.json();
+    if (!data.events?.length) return '';
+    const lines = data.events.map((e: any) => `• ${e.allDay ? 'todo el día' : e.time}  ${escapeHtml(e.title)}`);
+    return '\n\n<b>Agenda</b>\n' + lines.join('\n');
+  } catch { return ''; }
+}
+
+async function dailyMessage(): Promise<string> {
+  const { tasks } = await api('/tasks/list', { filter: 'hoy' });
+  const mins = tasks.reduce((n: number, t: any) => n + (t.estimate_min || 0), 0);
+  const fecha = new Date().toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', timeZone: TIMEZONE });
+  let text = `<b>Buenos días</b>\n${fecha}`;
+  if (!tasks.length) {
+    text += '\n\nNo hay nada planificado para hoy. Abre la app y usa “Planear el día”, o escríbeme aquí una tarea.';
+  } else {
+    text += ` · ${tasks.length} ${tasks.length === 1 ? 'tarea' : 'tareas'}${mins ? ' · ' + fmtMin(mins) : ''}\n\n`;
+    text += tasks.map(taskLine).join('\n');
+  }
+  text += await agendaLines();
+  text += '\n\nEscríbeme una tarea para añadirla, o <b>hecho &lt;texto&gt;</b> para completarla.';
+  return text;
+}
+
+async function reviewMessage(): Promise<string> {
+  const { tasks } = await api('/tasks/list', { filter: 'todas' });
+  const paradas = tasks.filter((t: any) => !t.when && !t.deadline && !t.recurrence && t.list && !/algun dia|algún día/i.test(t.list));
+  if (!paradas.length) return '<b>Revisión semanal</b>\n\nNo hay tareas paradas. Buen trabajo.';
+  const lista = paradas.slice(0, 15).map(taskLine).join('\n');
+  return `<b>Revisión semanal</b>\n\nEstas tareas no tienen fecha:\n\n${lista}` +
+    (paradas.length > 15 ? `\n\n…y ${paradas.length - 15} más.` : '') +
+    '\n\nDecide con cada una: ponle fecha desde la app, o escríbeme <b>hecho &lt;texto&gt;</b> si ya la hiciste.';
+}
+
+// ===== Mensajes del bot =====
+async function handleMessage(chatId: string, text: string) {
+  const bound = await getChatId();
+  const clean = text.trim();
+  const lower = slug(clean);
+
+  if (lower === 'start' || clean === '/start') {
+    if (!bound) {
+      await db.from('app_settings').upsert({ key: CHAT_KEY, value: chatId, updated_at: new Date().toISOString() });
+      await send(chatId, '<b>Listo.</b> Este chat ya está conectado a tu planificador.\n\nEscríbeme una tarea y la añado: “grabar reel mañana”, “facturación viernes !”, “revisar DMs cada día”.\n\nComandos: /hoy, /pendientes, y <b>hecho &lt;texto&gt;</b>.');
+    } else if (bound === chatId) {
+      await send(chatId, 'Este chat ya estaba conectado. Escríbeme una tarea o usa /hoy.');
+    } else {
+      await send(chatId, 'Este bot ya está conectado a otro chat.');
+    }
+    return;
+  }
+
+  if (!bound || bound !== chatId) {
+    await send(chatId, bound ? 'Este bot no responde en este chat.' : 'Escribe /start para conectar este chat con tu planificador.');
+    return;
+  }
+
+  if (clean === '/hoy' || lower === 'hoy' || lower === 'que tengo hoy') {
+    await send(chatId, await dailyMessage());
+    return;
+  }
+  if (clean === '/pendientes' || lower === 'pendientes' || lower === 'revision') {
+    await send(chatId, await reviewMessage());
+    return;
+  }
+  if (clean === '/ayuda' || clean === '/help') {
+    await send(chatId, 'Escríbeme una tarea para añadirla. Entiendo “hoy”, “mañana”, “el viernes”, “25/9”, “cada día”, “!” para urgente y “#lista”.\n\n/hoy · el plan del día\n/pendientes · lo que no tiene fecha\nhecho &lt;texto&gt; · completar una tarea');
+    return;
+  }
+
+  const doneMatch = clean.match(/^\/?(hecho|hecha|completar|done)\s+(.+)$/i);
+  if (doneMatch) {
+    try {
+      const t = await api('/tasks/complete', { title: doneMatch[2].trim() });
+      await send(chatId, `✅ Hecho: <b>${escapeHtml(t.title)}</b>` + (t.when ? `\nVuelve ${fmtDate(t.when)}.` : ''));
+    } catch (e) {
+      await send(chatId, '⚠️ ' + escapeHtml((e as Error).message));
+    }
+    return;
+  }
+
+  if (clean.startsWith('/')) {
+    await send(chatId, 'No conozco ese comando. Usa /ayuda.');
+    return;
+  }
+
+  try {
+    const fields = parseTask(clean);
+    if (!fields.title) { await send(chatId, 'No he entendido la tarea.'); return; }
+    const t = await api('/tasks', fields);
+    const detalle = [t.list, t.when ? fmtDate(t.when) : '', t.recurrence ? 'se repite' : '', t.urgent ? 'urgente' : ''].filter(Boolean).join(' · ');
+    await send(chatId, `➕ <b>${escapeHtml(t.title)}</b>\n<i>${escapeHtml(detalle)}</i>`);
+  } catch (e) {
+    await send(chatId, '⚠️ ' + escapeHtml((e as Error).message));
+  }
+}
+
+// ===== HTTP =====
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+
+function keyOk(candidate: string | null | undefined): boolean {
+  if (!API_KEY || API_KEY.length < 24 || !candidate) return false;
+  const a = new TextEncoder().encode(candidate), b = new TextEncoder().encode(API_KEY);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < b.length; i++) diff |= (a[i % (a.length || 1)] ?? 0) ^ b[i];
+  return diff === 0;
+}
+
+Deno.serve(async (req) => {
+  const url = new URL(req.url);
+  const at = url.pathname.indexOf('/tareas-bot');
+  let path = (at >= 0 ? url.pathname.slice(at + '/tareas-bot'.length) : url.pathname).replace(/\/+$/, '') || '/';
+
+  if (!BOT_TOKEN) return json({ error: 'Falta el secreto TELEGRAM_BOT_TOKEN' }, 500);
+
+  // Telegram entrega los mensajes aquí; se valida con la cabecera secreta que se registró en setup
+  if (path === '/webhook') {
+    if (!keyOk(req.headers.get('x-telegram-bot-api-secret-token'))) return json({ error: 'no' }, 401);
+    let update: any = {};
+    try { update = await req.json(); } catch { /* cuerpo vacío */ }
+    const msg = update.message || update.edited_message;
+    const text = msg?.text;
+    const chatId = msg?.chat?.id;
+    if (!text || !chatId) return json({ ok: true });
+    try {
+      await handleMessage(String(chatId), text);
+    } catch (e) {
+      console.error('Error atendiendo el mensaje:', e);
+      try { await send(String(chatId), '⚠️ Algo ha fallado: ' + escapeHtml((e as Error).message)); } catch { /* sin respuesta */ }
+    }
+    return json({ ok: true });
+  }
+
+  const inPath = path.match(/^\/k\/([^/]+)(\/.*)?$/);
+  if (!inPath || !keyOk(decodeURIComponent(inPath[1]))) return json({ error: 'Clave no válida' }, 401);
+  path = inPath[2] || '/';
+
+  try {
+    if (path === '/setup') {
+      const hook = `https://${url.host}/functions/v1/tareas-bot/webhook`;
+      await telegram('setWebhook', { url: hook, secret_token: API_KEY, allowed_updates: ['message'], drop_pending_updates: true });
+      const me = await telegram('getMe', {});
+      return json({ ok: true, bot: me.username, webhook: hook, chat: await getChatId() });
+    }
+    if (path === '/status') return json({ chat: await getChatId(), webhook: await telegram('getWebhookInfo', {}) });
+    if (path === '/daily' || path === '/review') {
+      const chat = await getChatId();
+      if (!chat) return json({ error: 'Todavía no hay ningún chat conectado: escribe /start al bot' }, 400);
+      const text = path === '/daily' ? await dailyMessage() : await reviewMessage();
+      await send(chat, text);
+      return json({ ok: true, sent: text.length });
+    }
+  } catch (e) {
+    return json({ error: (e as Error).message }, 500);
+  }
+  return json({ error: 'Ruta no encontrada' }, 404);
+});

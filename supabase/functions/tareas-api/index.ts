@@ -533,6 +533,12 @@ Deno.serve(async (req) => {
   }
 
   if (path === '/mcp') return handleMcp(req);
+  if (path === '/calendar' && req.method === 'GET') {
+    const from = url.searchParams.get('from') || today();
+    const to = url.searchParams.get('to') || from;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return json({ error: 'Fechas no válidas' }, 400);
+    return json(await readAgenda(from, to));
+  }
   if (path === '/calendar.ics' && req.method === 'GET') {
     try { return await tasksFeed(); } catch (e) { return json({ error: (e as Error).message }, 500); }
   }

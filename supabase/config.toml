@@ -3,3 +3,7 @@ project_id = "zttdbsprkqconspnwzxx"
 # La función comprueba su propia clave (TAREAS_API_KEY), no el JWT de Supabase
 [functions.tareas-api]
 verify_jwt = false
+
+# El bot valida la cabecera secreta de Telegram y su propia clave
+[functions.tareas-bot]
+verify_jwt = false

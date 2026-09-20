@@ -651,7 +651,11 @@ function batchDueToday() {
 }
 
 function renderHoy(view) {
-  const active = state.tasks.filter(isToday).sort((a, b) => (b.urgent - a.urgent) || (a.position - b.position));
+  // Orden del día: urgente, lo que vence o está atrasado, recurrente y el resto como lo tengas puesto
+  const rank = (t) => t.urgent ? 0
+    : (t.deadlineOn && t.deadlineOn <= today()) || (t.scheduledOn && t.scheduledOn < today()) ? 1
+    : t.recurrence ? 2 : 3;
+  const active = state.tasks.filter(isToday).sort((a, b) => rank(a) - rank(b) || a.position - b.position);
   const doneToday = state.tasks.filter(isDoneToday);
   const stale = state.tasks.filter(isStale);
   const batchRows = batchDueToday();
@@ -690,7 +694,7 @@ function renderHoy(view) {
       icon('alert-triangle'),
       h('span', {}, 'Hoy va cargado: ' + active.length + ' tareas' + (mins ? ' y ' + fmtMin(mins) : '') + '. Planea el día y aplaza lo que no sea de hoy.')));
   }
-  active.forEach(t => box.append(taskRowEl(t, { hideDate: t.scheduledOn === today(), showList: !(hoyCol() && t.columnId === hoyCol().id), actions: (task) => [snoozeButton(task)] })));
+  active.forEach(t => box.append(taskRowEl(t, { hideDate: t.scheduledOn === today(), actions: (task) => [snoozeButton(task)] })));
   if (!active.length && !batchRows.length) {
     box.append(doneToday.length ? emptyState('circle-check', 'Todo hecho por hoy', 'Lo que completes mañana volverá a empezar de cero.')
       : emptyState('sun', 'Nada planificado para hoy', 'Escribe una tarea arriba o abre una del tablero y ponle fecha de hoy.'));
@@ -715,7 +719,7 @@ function renderProximo(view) {
   for (const t of list) {
     const key = keyOf(t);
     if (key !== last) { box.append(h('div', { class: 'group-title' }, fmtDate(key))); last = key; }
-    box.append(taskRowEl(t, { hideDate: true, showList: true, actions: (task) => [snoozeButton(task)] }));
+    box.append(taskRowEl(t, { hideDate: true, actions: (task) => [snoozeButton(task)] }));
   }
   view.append(box);
 }

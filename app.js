@@ -6,6 +6,7 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
+const APP_VERSION = '10';
 const STALE_DAYS = 10;
 const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana' };
 const BATCH_TEMPLATES = {
@@ -1185,6 +1186,13 @@ async function settingsModal() {
   openModal(h('div', {},
     h('h3', {}, 'Ajustes'),
     appearanceSection(),
+    h('h4', {}, 'Aplicación'),
+    h('div', { style: 'display: flex; align-items: center; gap: 10px; flex-wrap: wrap;' },
+      h('button', { class: 'btn', onclick: () => {
+        // Recarga saltándose la caché: el navegador vuelve a pedir la página y sus archivos
+        location.replace(location.pathname + '?v=' + Date.now());
+      } }, icon('refresh'), 'Buscar actualizaciones'),
+      h('span', { style: 'font-size: 12.5px; color: var(--text-3);' }, 'Versión ' + APP_VERSION)),
     h('h4', {}, 'Calendario'),
     h('label', {}, 'Ver mi agenda en la vista Hoy'),
     h('p', {}, 'Pega la dirección privada en formato iCal de cada calendario, una por línea. En Google Calendar está en Configuración del calendario → “Dirección secreta en formato iCal”.'),

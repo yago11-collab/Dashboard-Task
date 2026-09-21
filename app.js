@@ -6,9 +6,17 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const APP_VERSION = '19';
+const APP_VERSION = '20';
 const STALE_DAYS = 10;
-const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana' };
+const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana', biweekly: 'Cada 2 semanas', monthly: 'Cada mes' };
+
+// Texto de una repetición, incluidas las de "cada N días"
+function recurrenceLabel(r) {
+  if (!r) return '';
+  const m = String(r).match(/^days:(\d+)$/);
+  if (m) return 'Cada ' + m[1] + ' días';
+  return RECURRENCES[r] || r;
+}
 const BATCH_TEMPLATES = {
   Reel: ['Idea', 'Guion', 'Grabación', 'Edición', 'Programado'],
   Carrusel: ['Idea', 'Copy', 'Diseño', 'Programado'],
@@ -137,6 +145,7 @@ const colTasks = (colId) => state.tasks.filter(t => t.columnId === colId).sort((
 // espera en el dispositivo y se reintenta al volver la conexión.
 const OPS_KEY = 'tareas_ops';
 const SNAPSHOT_KEY = 'tareas_datos';
+let ultimoEnvioPropio = 0;
 let ops = [];
 try { ops = JSON.parse(localStorage.getItem(OPS_KEY) || '[]'); } catch (e) { ops = []; }
 let flushing = false;
@@ -198,6 +207,7 @@ async function flushOps() {
     }
   }
   flushing = false;
+  ultimoEnvioPropio = Date.now();
   setSaveState('saved');
   state.offline = false;
 }
@@ -385,9 +395,29 @@ async function loadAgenda() {
 // ===== Reglas de negocio =====
 // La próxima vez que toca. Semanal se ancla al día que tenía puesto (los lunes siguen siendo lunes)
 function nextOccurrence(t) {
-  if (t.recurrence === 'weekly') {
-    let next = addDays(t.scheduledOn || today(), 7);
-    while (next <= today()) next = addDays(next, 7);
+  const cadaN = String(t.recurrence || '').match(/^days:(\d+)$/);
+  if (cadaN) {
+    const paso = Math.max(1, Number(cadaN[1]));
+    let next = addDays(t.scheduledOn || today(), paso);
+    while (next <= today()) next = addDays(next, paso);
+    return next;
+  }
+  if (t.recurrence === 'monthly') {
+    // Mismo día de cada mes; si el mes no lo tiene, el último día
+    const base = parseISO(t.scheduledOn || today());
+    const dia = base.getDate();
+    let d = new Date(base.getFullYear(), base.getMonth(), 1);
+    do {
+      d = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+      const ultimo = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+      d.setDate(Math.min(dia, ultimo));
+    } while (iso(d) <= today());
+    return iso(d);
+  }
+  if (t.recurrence === 'weekly' || t.recurrence === 'biweekly') {
+    const paso = t.recurrence === 'biweekly' ? 14 : 7;
+    let next = addDays(t.scheduledOn || today(), paso);
+    while (next <= today()) next = addDays(next, paso);
     return next;
   }
   let next = addDays(today(), 1);
@@ -544,6 +574,9 @@ function parseQuick(text) {
   take(/\s(!{1,3}|urgente)(?=\s)/i, () => { out.urgent = true; });
   take(/\scada d[ií]a(?=\s)/i, () => { out.recurrence = 'daily'; });
   take(/\scada semana(?=\s)/i, () => { out.recurrence = 'weekly'; });
+  take(/\scada mes(?=\s)/i, () => { out.recurrence = 'monthly'; });
+  take(/\scada (\d+) semanas?(?=\s)/i, (m) => { out.recurrence = 'days:' + (Number(m[1]) * 7); });
+  take(/\scada (\d+) d[ií]as(?=\s)/i, (m) => { out.recurrence = 'days:' + Number(m[1]); });
   take(/\s(d[ií]as )?laborables(?=\s)/i, () => { out.recurrence = 'weekdays'; });
   take(/\spasado ma[ñn]ana(?=\s)/i, () => { out.scheduledOn = addDays(today(), 2); });
   take(/\sma[ñn]ana(?=\s)/i, () => { if (out.scheduledOn) return false; out.scheduledOn = addDays(today(), 1); });
@@ -611,7 +644,7 @@ function taskChips(t, opts = {}) {
   if (t.scheduledOn && !opts.hideDate && !(t.recurrence && t.lastDoneOn === now)) {
     chips.push(h('span', { class: 'chip ' + (t.scheduledOn < now && !t.checked ? 'late' : 'date') }, icon('calendar'), fmtDate(t.scheduledOn)));
   }
-  if (t.recurrence) chips.push(h('span', { class: 'chip recur' }, icon('repeat'), RECURRENCES[t.recurrence] || t.recurrence));
+  if (t.recurrence) chips.push(h('span', { class: 'chip recur' }, icon('repeat'), recurrenceLabel(t.recurrence)));
   if (t.estimateMin) chips.push(h('span', { class: 'chip' }, icon('clock'), fmtMin(t.estimateMin)));
   if (t.remindAt && !t.checked) chips.push(h('span', { class: 'chip recur' }, icon('bell'), remindTime(t)));
   if (t.subtasks.length) chips.push(h('span', { class: 'chip' }, icon('list-check'), t.subtasks.filter(s => s.checked).length + '/' + t.subtasks.length));
@@ -680,6 +713,54 @@ function enableSwipe(wrap, row, t) {
   row.addEventListener('touchcancel', soltar);
 }
 
+// Mantener pulsado y arrastrar para cambiar el orden con el dedo.
+// El orden del día manda: una tarea normal no puede colarse por encima de una urgente.
+function enableTouchSort(wrap, row, t, opts) {
+  if (!opts.sortable) return;
+  let timer = null, dragging = false, y0 = 0, lista = [], alturas = [], indice = 0;
+
+  const arranca = () => {
+    dragging = true;
+    lista = [...wrap.parentElement.querySelectorAll('.swipe')];
+    alturas = lista.map(el => el.getBoundingClientRect());
+    indice = lista.indexOf(wrap);
+    wrap.classList.add('dragging-row');
+    if (navigator.vibrate) navigator.vibrate(8);
+  };
+
+  row.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    y0 = e.touches[0].clientY;
+    timer = setTimeout(arranca, 380);
+  }, { passive: true });
+
+  row.addEventListener('touchmove', (e) => {
+    if (!dragging) {
+      if (timer && Math.abs(e.touches[0].clientY - y0) > 8) { clearTimeout(timer); timer = null; }
+      return;
+    }
+    e.preventDefault();
+    const dy = e.touches[0].clientY - y0;
+    row.style.transform = 'translateY(' + dy + 'px)';
+    const centro = alturas[indice].top + alturas[indice].height / 2 + dy;
+    let destino = 0;
+    alturas.forEach((r, i) => { if (centro > r.top + r.height / 2) destino = i; });
+    wrap.dataset.destino = destino;
+  }, { passive: false });
+
+  const soltar = () => {
+    clearTimeout(timer); timer = null;
+    if (!dragging) return;
+    dragging = false;
+    wrap.classList.remove('dragging-row');
+    row.style.transform = '';
+    const destino = Number(wrap.dataset.destino);
+    if (!Number.isNaN(destino) && destino !== indice && opts.onSort) opts.onSort(t, destino);
+  };
+  row.addEventListener('touchend', soltar);
+  row.addEventListener('touchcancel', soltar);
+}
+
 function taskRowEl(t, opts = {}) {
   const done = t.checked || (t.recurrence && t.lastDoneOn === today());
   const row = h('div', { class: 'row' + (done ? ' done' : '') },
@@ -696,6 +777,7 @@ function taskRowEl(t, opts = {}) {
     h('div', { class: 'swipe-bg del' }, icon('trash'), h('span', {}, 'Borrar')),
     row);
   enableSwipe(wrap, row, t);
+  enableTouchSort(wrap, row, t, opts);
   return wrap;
 }
 
@@ -930,7 +1012,21 @@ function renderHoy(view) {
       icon('alert-triangle'),
       h('span', {}, 'Hoy va cargado: ' + active.length + ' tareas' + (mins ? ' y ' + fmtMin(mins) : '') + '. Planea el día y aplaza lo que no sea de hoy.')));
   }
-  active.forEach(t => box.append(taskRowEl(t, { hideDate: t.scheduledOn === today(), actions: (task) => [snoozeButton(task)] })));
+  const reordenar = (tarea, destino) => {
+    const orden = active.filter(o => o !== tarea);
+    orden.splice(Math.max(0, Math.min(orden.length, destino)), 0, tarea);
+    // El orden del día vuelve a aplicarse: dentro de cada grupo se respeta lo que acabas de hacer
+    const estable = orden.map((o, i) => ({ o, i })).sort((a, b) => rank(a.o) - rank(b.o) || a.i - b.i).map(x => x.o);
+    estable.forEach((o, i) => { o.position = i; });
+    saveTasks(estable);
+    render();
+  };
+  active.forEach(t => box.append(taskRowEl(t, {
+    hideDate: t.scheduledOn === today(),
+    actions: (task) => [snoozeButton(task)],
+    sortable: true,
+    onSort: reordenar
+  })));
   if (!active.length && !batchRows.length) {
     box.append(doneToday.length ? emptyState('circle-check', 'Todo hecho por hoy', 'Lo que completes mañana volverá a empezar de cero.')
       : emptyState('sun', 'Nada planificado para hoy', 'Escribe una tarea arriba o abre una del tablero y ponle fecha de hoy.'));
@@ -1371,12 +1467,20 @@ function renderDetail() {
       h('div', { class: 'field' }, h('span', {}, icon('flag'), 'Fecha límite'),
         h('input', { type: 'date', value: t.deadlineOn || '', onchange: (e) => { t.deadlineOn = e.target.value || null; save(); } })),
       h('div', { class: 'field' }, h('span', {}, icon('repeat'), 'Repetir'),
-        h('select', { onchange: (e) => {
-          t.recurrence = e.target.value || null;
-          if (t.recurrence && !t.scheduledOn) t.scheduledOn = today();
-          save(); renderDetail();
-        } }, h('option', { value: '' }, 'No se repite'),
-          Object.entries(RECURRENCES).map(([k, v]) => h('option', { value: k, selected: t.recurrence === k }, v)))));
+        h('div', { class: 'inline' },
+          h('select', { onchange: (e) => {
+            t.recurrence = e.target.value === 'days' ? 'days:3' : (e.target.value || null);
+            if (t.recurrence && !t.scheduledOn) t.scheduledOn = today();
+            save(); renderDetail();
+          } }, h('option', { value: '' }, 'No se repite'),
+            Object.entries(RECURRENCES).map(([k, v]) => h('option', { value: k, selected: t.recurrence === k }, v)),
+            h('option', { value: 'days', selected: /^days:/.test(t.recurrence || '') }, 'Cada N días')),
+          /^days:/.test(t.recurrence || '')
+            ? h('input', { type: 'number', min: 1, max: 365, value: Number(String(t.recurrence).split(':')[1]) || 3,
+                style: 'width: 74px; padding: 6px 9px; border: 1px solid var(--border-2); border-radius: 8px; background: var(--bg);',
+                onchange: (e) => { t.recurrence = 'days:' + Math.max(1, Math.min(365, Number(e.target.value) || 3)); save(); renderDetail(); } })
+            : null,
+          /^days:/.test(t.recurrence || '') ? h('span', { style: 'font-size: 12.5px; color: var(--text-3);' }, 'días') : null)));
   }
   if (state.hasTrash) {
     fields.push(h('div', { class: 'field' }, h('span', {}, icon('bell'), 'Recordatorio'),
@@ -1680,6 +1784,25 @@ function render() {
   if (view.querySelector('.board')) view.querySelector('.board').scrollLeft = boardScroll;
 }
 
+// ===== Cambios desde otro dispositivo, al instante =====
+let recargaPendiente = null;
+
+function escucharCambios() {
+  sb.channel('cambios-tareas')
+    .on('postgres_changes', { event: '*', schema: 'public' }, () => {
+      // Los cambios que acabo de mandar yo no hace falta recargarlos
+      if (Date.now() - ultimoEnvioPropio < 2500) return;
+      const ocupado = ops.length || state.detailId || !$('#modalWrap').hidden || state.addingIn ||
+        /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName) || $('.popmenu');
+      if (ocupado) return;
+      clearTimeout(recargaPendiente);
+      recargaPendiente = setTimeout(async () => {
+        try { await loadAll(); saveSnapshot(); render(); } catch (e) { console.warn('No se ha podido refrescar:', e); }
+      }, 1200);
+    })
+    .subscribe();
+}
+
 // ===== Sesión =====
 async function start() {
   try {
@@ -1689,6 +1812,7 @@ async function start() {
     render();
     loadAgenda();
     flushOps();
+    escucharCambios();
   } catch (e) {
     console.error(e);
     if (loadSnapshot()) {

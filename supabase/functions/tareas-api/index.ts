@@ -30,6 +30,8 @@ const WEEKDAYS = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes'
 const slug = (s: string) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
   .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
+const validRecurrence = (r: string) => RECURRENCES.includes(r) || /^days:\d+$/.test(r);
+
 // Acepta AAAA-MM-DD, "hoy", "mañana", "pasado mañana" o un día de la semana
 function parseDate(value?: string | null): string | null {
   if (!value) return null;
@@ -49,10 +51,25 @@ function parseDate(value?: string | null): string | null {
 
 // Semanal se ancla al día que tenía puesto; diaria y laborables, al día siguiente
 function nextOccurrence(recurrence: string, from?: string | null): string {
-  if (recurrence === 'weekly') {
-    let next = addDays(from || today(), 7);
-    while (next <= today()) next = addDays(next, 7);
+  const cadaN = recurrence.match(/^days:(\d+)$/);
+  if (cadaN || recurrence === 'weekly' || recurrence === 'biweekly') {
+    const paso = cadaN ? Math.max(1, Number(cadaN[1])) : (recurrence === 'biweekly' ? 14 : 7);
+    let next = addDays(from || today(), paso);
+    while (next <= today()) next = addDays(next, paso);
     return next;
+  }
+  if (recurrence === 'monthly') {
+    const base = new Date((from || today()) + 'T12:00:00Z');
+    const dia = base.getUTCDate();
+    let d = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), 1, 12));
+    let iso = '';
+    do {
+      d = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1, 12));
+      const ultimo = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0, 12)).getUTCDate();
+      d.setUTCDate(Math.min(dia, ultimo));
+      iso = d.toISOString().slice(0, 10);
+    } while (iso <= today());
+    return iso;
   }
   let next = addDays(today(), 1);
   if (recurrence === 'weekdays') while ([0, 6].includes(weekday(next))) next = addDays(next, 1);
@@ -74,7 +91,7 @@ function findColumn(cols: Column[], name?: string | null): Column | undefined {
   return cols.find((c) => slug(c.title) === s) || cols.find((c) => slug(c.title).includes(s));
 }
 
-const RECURRENCES = ['daily', 'weekdays', 'weekly'];
+const RECURRENCES = ['daily', 'weekdays', 'weekly', 'biweekly', 'monthly'];
 
 function present(t: Record<string, unknown>, cols: Column[]) {
   const col = cols.find((c) => c.id === t.column_id);
@@ -90,6 +107,8 @@ function present(t: Record<string, unknown>, cols: Column[]) {
     recurrence: t.recurrence || undefined,
     urgent: t.priority === 'urgent' || undefined,
     done: t.priority === 'done' || !!t.completed_at || (t.recurrence && t.last_done_on === today()) || undefined,
+    estimate_min: t.estimate_min || undefined,
+    remind_at: t.remind_at || undefined,
     subtasks: subtasks.length ? subtasks : undefined,
   };
 }
@@ -97,7 +116,7 @@ function present(t: Record<string, unknown>, cols: Column[]) {
 async function addTask(a: Record<string, any>) {
   const title = String(a.title || '').trim();
   if (!title) throw new Error('Falta el título de la tarea.');
-  if (a.recurrence && !RECURRENCES.includes(a.recurrence)) throw new Error('recurrence debe ser daily, weekdays o weekly.');
+  if (a.recurrence && !validRecurrence(a.recurrence)) throw new Error('recurrence debe ser daily, weekdays, weekly, biweekly, monthly o days:N.');
 
   const cols = await getColumns();
   let when = parseDate(a.when);
@@ -207,7 +226,7 @@ async function updateTask(a: Record<string, any>) {
   if (a.deadline !== undefined) patch.deadline_on = parseDate(a.deadline);
   if (a.urgent !== undefined && t.priority !== 'done') patch.priority = a.urgent ? 'urgent' : null;
   if (a.recurrence !== undefined) {
-    if (a.recurrence && !RECURRENCES.includes(a.recurrence)) throw new Error('recurrence debe ser daily, weekdays o weekly.');
+    if (a.recurrence && !validRecurrence(a.recurrence)) throw new Error('recurrence debe ser daily, weekdays, weekly, biweekly, monthly o days:N.');
     patch.recurrence = a.recurrence || null;
   }
   if (a.list) {
@@ -267,7 +286,7 @@ const TOOLS = [
         deadline: { type: 'string', description: 'Fecha límite. ' + dateHelp },
         list: { type: 'string', description: 'Lista del tablero: Hoy, Esta semana, En espera, Algún día…' },
         urgent: { type: 'boolean' },
-        recurrence: { type: 'string', enum: RECURRENCES, description: 'daily = cada día, weekdays = laborables, weekly = cada semana.' },
+        recurrence: { type: 'string', description: 'daily, weekdays, weekly, biweekly, monthly o days:N (cada N días).' },
         subtasks: { type: 'array', items: { type: 'string' } },
       },
       required: ['title'],
@@ -300,7 +319,7 @@ const TOOLS = [
         deadline: { type: 'string', description: dateHelp + ' Cadena vacía para quitarla.' },
         list: { type: 'string' },
         urgent: { type: 'boolean' },
-        recurrence: { type: 'string', description: 'daily, weekdays, weekly o cadena vacía para que deje de repetirse.' },
+        recurrence: { type: 'string', description: 'daily, weekdays, weekly, biweekly, monthly, days:N, o cadena vacía para que deje de repetirse.' },
       },
     },
   },

@@ -862,3 +862,7 @@ h1 { text-wrap: balance; }
 .swipe.armed.to-left .swipe-bg.del { background: var(--danger); color: #fff; }
 .swipe.armed.to-right .swipe-bg.urg { background: var(--warn-text); color: var(--bg); }
 .swipe.leaving { max-height: 0 !important; opacity: 0; }
+
+/* Arrastrar con el dedo para reordenar */
+.swipe.dragging-row { z-index: 5; }
+.swipe.dragging-row > .row { box-shadow: var(--shadow-lg); border-radius: 10px; background: var(--bg-card); transform-origin: center; }

@@ -6,7 +6,7 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const APP_VERSION = '18';
+const APP_VERSION = '19';
 const STALE_DAYS = 10;
 const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana' };
 const BATCH_TEMPLATES = {
@@ -667,7 +667,8 @@ function enableSwipe(wrap, row, t) {
       row.style.transform = '';
       t.urgent = !t.urgent;
       saveTasks([t]);
-      toast(t.urgent ? 'Marcada como urgente' : 'Ya no es urgente');
+      toast(t.urgent ? 'Marcada como urgente' : 'Ya no es urgente', 5000,
+        { label: 'Deshacer', onclick: () => { t.urgent = !t.urgent; saveTasks([t]); render(); } });
       setTimeout(render, 160);
     } else {
       row.style.transform = '';

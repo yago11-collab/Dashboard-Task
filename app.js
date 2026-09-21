@@ -6,7 +6,7 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const APP_VERSION = '16';
+const APP_VERSION = '17';
 const STALE_DAYS = 10;
 const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana' };
 const BATCH_TEMPLATES = {
@@ -115,7 +115,7 @@ function slug(name) {
 let toastTimer = null;
 function toast(msg, ms = 2400, action) {
   const el = $('#toast');
-  el.replaceChildren(msg);
+  el.replaceChildren(h('span', { class: 'toast-msg' }, msg));
   if (action) {
     el.append(h('button', { class: 'toast-action', onclick: () => { el.classList.remove('on'); action.onclick(); } }, action.label));
   }
@@ -623,9 +623,57 @@ function taskChips(t, opts = {}) {
   return chips;
 }
 
+// Deslizar una fila hacia la izquierda la manda a la papelera (con deshacer)
+function enableSwipe(wrap, row, t) {
+  let x0 = 0, y0 = 0, dx = 0, sliding = false, decided = false;
+  const UMBRAL = 96;
+
+  row.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    x0 = e.touches[0].clientX; y0 = e.touches[0].clientY;
+    dx = 0; sliding = false; decided = false;
+    row.style.transition = 'none';
+  }, { passive: true });
+
+  row.addEventListener('touchmove', (e) => {
+    if (e.touches.length !== 1) return;
+    const mx = e.touches[0].clientX - x0, my = e.touches[0].clientY - y0;
+    if (!decided) {
+      // Solo se considera deslizamiento si el gesto es claramente horizontal
+      if (Math.abs(mx) < 10 && Math.abs(my) < 10) return;
+      decided = true;
+      sliding = Math.abs(mx) > Math.abs(my) + 4;
+      if (sliding) wrap.classList.add('swiping');
+    }
+    if (!sliding) return;
+    e.preventDefault();
+    dx = Math.min(0, mx);
+    row.style.transform = 'translateX(' + dx + 'px)';
+    wrap.classList.toggle('armed', dx <= -UMBRAL);
+  }, { passive: false });
+
+  const soltar = () => {
+    if (!sliding) { row.style.transition = ''; return; }
+    row.style.transition = 'transform 0.22s var(--ease-out)';
+    wrap.classList.remove('swiping');
+    if (dx <= -UMBRAL) {
+      row.style.transform = 'translateX(-110%)';
+      wrap.style.maxHeight = wrap.offsetHeight + 'px';
+      wrap.classList.add('leaving');
+      setTimeout(() => removeTask(t), 170);
+    } else {
+      row.style.transform = '';
+      wrap.classList.remove('armed');
+    }
+    sliding = false;
+  };
+  row.addEventListener('touchend', soltar);
+  row.addEventListener('touchcancel', soltar);
+}
+
 function taskRowEl(t, opts = {}) {
   const done = t.checked || (t.recurrence && t.lastDoneOn === today());
-  return h('div', { class: 'row' + (done ? ' done' : '') },
+  const row = h('div', { class: 'row' + (done ? ' done' : '') },
     checkBtn(done, () => toggleTask(t)),
     h('div', { class: 'row-main', onclick: () => openDetail(t.id) },
       h('div', { class: 'row-title' }, t.title),
@@ -634,6 +682,11 @@ function taskRowEl(t, opts = {}) {
     ),
     opts.actions ? h('div', { class: 'row-actions' }, opts.actions(t)) : null
   );
+  const wrap = h('div', { class: 'swipe' },
+    h('div', { class: 'swipe-bg' }, icon('trash'), h('span', {}, 'Borrar')),
+    row);
+  enableSwipe(wrap, row, t);
+  return wrap;
 }
 
 function quickBar(placeholder, defaults) {

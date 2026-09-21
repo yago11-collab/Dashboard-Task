@@ -754,7 +754,8 @@ h1 { text-wrap: balance; }
 .modal .inline { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* ===== Deshacer, búsqueda y papelera ===== */
-.toast { display: inline-flex; align-items: center; gap: 14px; }
+.toast { display: inline-flex; align-items: center; gap: 16px; }
+.toast-msg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .toast-action { color: var(--bg); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; font-size: 13px; }
 .modal input[type=time] { padding: 6px 9px; border: 1px solid var(--border-2); border-radius: 8px; background: var(--bg); outline: none; }
 .search-results { margin-top: 12px; max-height: 50vh; overflow-y: auto; }
@@ -790,7 +791,7 @@ h1 { text-wrap: balance; }
 }
 .row { border-radius: 10px; margin: 0 -8px; padding-left: 12px; padding-right: 12px; }
 .row:hover { background: var(--bg-hover); }
-.row + .row { border-top: 1px solid var(--border); }
+.swipe + .swipe > .row, .row + .row { border-top: 1px solid var(--border); }
 .row { border-bottom: none; }
 .group-title { font-size: 12.5px; letter-spacing: 0.01em; margin: 26px 2px 2px; }
 
@@ -845,3 +846,17 @@ h1 { text-wrap: balance; }
   .day-side { margin-left: auto; }
   .day-side .btn.primary { padding: 8px 12px; }
 }
+
+/* Deslizar para borrar */
+.swipe { position: relative; overflow: hidden; border-radius: 10px; transition: max-height 0.18s var(--ease-out), opacity 0.18s var(--ease-out); }
+.swipe > .row { position: relative; background: var(--bg); touch-action: pan-y; }
+.swipe > .row:hover { background: var(--bg-hover); }
+.swipe-bg {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: flex-end; gap: 7px;
+  padding-right: 18px; border-radius: 10px; background: var(--danger-soft); color: var(--danger);
+  font-size: 13px; font-weight: 500; opacity: 0; transition: opacity 0.12s var(--ease-out);
+}
+.swipe-bg i { font-size: 17px; }
+.swipe.swiping .swipe-bg { opacity: 1; }
+.swipe.armed .swipe-bg { background: var(--danger); color: var(--on-accent, #fff); opacity: 1; }
+.swipe.leaving { max-height: 0 !important; opacity: 0; }

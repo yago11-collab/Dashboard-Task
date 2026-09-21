@@ -6,7 +6,7 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const APP_VERSION = '15';
+const APP_VERSION = '16';
 const STALE_DAYS = 10;
 const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana' };
 const BATCH_TEMPLATES = {
@@ -644,7 +644,7 @@ function quickBar(placeholder, defaults) {
   return [
     h('div', { class: 'quick' }, icon('plus'), input, h('kbd', {}, 'N')),
     h('p', { class: 'quick-hint' }, state.hasNewSchema
-      ? 'Entiende fechas y listas: “Grabar reel mañana”, “Facturación viernes !”, “Revisar DMs cada día”, “#espera”.'
+      ? 'Entiende “mañana”, “el viernes”, “cada día”, “a las 17:00”, “!” para urgente y “#lista”.'
       : 'Escribe y pulsa Enter.')
   ];
 }
@@ -806,31 +806,39 @@ function renderHoy(view) {
   const mins = sumMinutes(active);
   const agendaHoy = state.agenda.date === today() ? state.agenda.events.length : 0;
   const agendaCount = agendaHoy;
-  $('#viewActions').append(h('button', { class: 'btn', onclick: plannerModal }, icon('wand'), 'Planear el día'));
 
   const hechas = doneToday.length;
   const totales = active.length + hechas;
   const pct = totales ? hechas / totales : 0;
-  const circ = 2 * Math.PI * 23;
-  const frase = !totales ? 'Sin nada planificado todavía'
+  const circ = 2 * Math.PI * 20;
+  const ahora = new Date();
+  const proximo = (state.agenda.date === today() ? state.agenda.events : [])
+    .filter(e => e.allDay || !e.end || e.end >= String(ahora.getHours()).padStart(2, '0') + ':' + String(ahora.getMinutes()).padStart(2, '0'))[0];
+
+  const frase = !totales ? 'Nada planificado todavía'
     : active.length === 0 ? 'Día terminado'
-    : 'Te ' + (active.length === 1 ? 'queda 1 tarea' : 'quedan ' + active.length + ' tareas');
-  const detalle = [
-    new Date().toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' }),
-    mins ? fmtMin(mins) : '',
-    agendaCount ? (agendaCount === 1 ? '1 evento' : agendaCount + ' eventos') : ''
-  ].filter(Boolean).join(' · ');
+    : 'Te ' + (active.length === 1 ? 'queda 1 tarea' : 'quedan ' + active.length + ' tareas') + (mins ? ' · ' + fmtMin(mins) : '');
+  const segunda = proximo
+    ? (proximo.allDay ? 'Todo el día: ' + proximo.title : proximo.time + ' · ' + proximo.title)
+    : agendaCount ? 'Sin más eventos por hoy' : 'Sin eventos en la agenda';
 
   const box = h('div', { class: 'narrow' },
     h('div', { class: 'day-head' },
-      h('div', { class: 'day-ring' },
-        h('svg', { viewBox: '0 0 54 54', 'aria-hidden': 'true' },
-          h('circle', { class: 'track', cx: 27, cy: 27, r: 23 }),
-          h('circle', { class: 'bar', cx: 27, cy: 27, r: 23, 'stroke-dasharray': (circ * pct).toFixed(1) + ' ' + circ.toFixed(1) })),
-        h('span', {}, totales ? hechas + '/' + totales : '0')),
-      h('div', {},
+      h('div', { class: 'day-date' },
+        h('span', { class: 'day-num' }, String(ahora.getDate())),
+        h('span', { class: 'day-when' },
+          h('span', {}, ahora.toLocaleDateString('es-ES', { weekday: 'long' })),
+          h('span', { class: 'day-month' }, 'de ' + ahora.toLocaleDateString('es-ES', { month: 'long' })))),
+      h('div', { class: 'day-info' },
         h('div', { class: 'day-line' }, frase),
-        h('div', { class: 'day-sub' }, detalle))),
+        h('div', { class: 'day-sub' }, segunda)),
+      h('div', { class: 'day-side' },
+        totales ? h('div', { class: 'day-ring', title: hechas + ' de ' + totales + ' hechas' },
+          h('svg', { viewBox: '0 0 46 46', 'aria-hidden': 'true' },
+            h('circle', { class: 'track', cx: 23, cy: 23, r: 20 }),
+            h('circle', { class: 'bar', cx: 23, cy: 23, r: 20, 'stroke-dasharray': (circ * pct).toFixed(1) + ' ' + circ.toFixed(1) })),
+          h('span', {}, hechas + '/' + totales)) : null,
+        h('button', { class: 'btn primary', onclick: plannerModal }, icon('wand'), 'Planear el día'))),
     quickBar('Añadir una tarea para hoy…', { scheduledOn: today() }));
   if (stale.length) {
     box.append(h('button', { class: 'side-note', style: 'margin: 0 0 8px; width: 100%;', onclick: () => setView('revision') },
@@ -1575,14 +1583,18 @@ function renderNav() {
     h('button', { class: state.view === key ? 'on' : '', onclick: () => setView(key) }, icon(VIEWS[key].icon), VIEWS[key].title)));
 }
 
+let vistaPintada = null;
 function render() {
   if (!VIEWS[state.view]) state.view = 'hoy';
+  const cambioDeVista = vistaPintada !== state.view;
+  vistaPintada = state.view;
   const view = $('#view');
   const scroll = view.scrollTop;
   const boardScroll = view.querySelector('.board') ? view.querySelector('.board').scrollLeft : 0;
   view.className = 'view';
   view.replaceChildren();
   $('#viewTitle').textContent = VIEWS[state.view].title;
+  $('#viewTitle').hidden = state.view === 'hoy';
   $('#viewSub').textContent = '';
   $('#viewActions').replaceChildren();
 
@@ -1596,6 +1608,10 @@ function render() {
   $('#viewActions').append(h('button', { class: 'icon-btn', title: 'Buscar (/)', 'aria-label': 'Buscar', onclick: searchModal }, icon('search')));
   $('#viewActions').append(h('button', { class: 'icon-btn only-mobile', title: 'Ajustes', 'aria-label': 'Ajustes', onclick: settingsModal }, icon('settings')));
   ({ hoy: renderHoy, proximo: renderProximo, tablero: renderTablero, lotes: renderLotes, ideas: renderIdeas, revision: renderRevision, hecho: renderHecho, papelera: renderPapelera })[state.view](view);
+  if (cambioDeVista) {
+    const lienzo = view.firstElementChild;
+    if (lienzo) { lienzo.classList.add('enter'); setTimeout(() => lienzo.classList.remove('enter'), 700); }
+  }
   renderNav();
   view.scrollTop = scroll;
   if (view.querySelector('.board')) view.querySelector('.board').scrollLeft = boardScroll;

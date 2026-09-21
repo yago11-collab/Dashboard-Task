@@ -766,15 +766,22 @@ h1 { text-wrap: balance; }
 .search-meta { font-size: 12px; color: var(--text-3); }
 
 /* ===== Acabado ===== */
-/* Cabecera del día: un anillo de progreso y una frase, en vez de una lista pelada */
-.day-head { display: flex; align-items: center; gap: 16px; padding: 4px 2px 20px; }
-.day-ring { width: 54px; height: 54px; flex: none; position: relative; }
+/* Portada del día: la fecha manda, el resumen acompaña */
+.day-head { display: flex; align-items: flex-start; gap: 22px; padding: 2px 2px 20px; border-bottom: 1px solid var(--text); margin-bottom: 18px; }
+.day-date { display: flex; align-items: flex-start; gap: 12px; flex: none; }
+.day-num { font-size: 60px; line-height: 0.82; font-weight: 500; letter-spacing: -0.055em; font-variant-numeric: tabular-nums; }
+.day-when { display: flex; flex-direction: column; padding-top: 5px; font-size: 14.5px; font-weight: 500; }
+.day-when > span:first-child:first-letter { text-transform: uppercase; }
+.day-month { color: var(--text-3); font-weight: 400; font-size: 13px; }
+.day-info { flex: 1; min-width: 0; padding-top: 6px; }
+.day-line { font-size: 15.5px; font-weight: 500; letter-spacing: -0.01em; }
+.day-sub { font-size: 13px; color: var(--text-3); margin-top: 3px; overflow-wrap: anywhere; }
+.day-side { display: flex; align-items: center; gap: 14px; flex: none; padding-top: 2px; }
+.day-ring { width: 46px; height: 46px; position: relative; flex: none; }
 .day-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
-.day-ring .track { fill: none; stroke: var(--border); stroke-width: 4; }
+.day-ring .track { fill: none; stroke: var(--border-2); stroke-width: 3.5; }
 .day-ring .bar { fill: none; stroke: var(--accent); stroke-width: 4; stroke-linecap: round; transition: stroke-dasharray 0.6s var(--ease-out); }
-.day-ring span { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.day-line { font-size: 17px; font-weight: 500; letter-spacing: -0.015em; }
-.day-sub { font-size: 13px; color: var(--text-3); margin-top: 2px; }
+.day-ring span { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
 /* Las acciones de cada fila solo aparecen cuando hacen falta */
 @media (hover: hover) {
@@ -813,4 +820,28 @@ h1 { text-wrap: balance; }
   .view { padding: 2px 16px calc(84px + env(safe-area-inset-bottom)); }
   .row { margin: 0 -6px; padding-left: 8px; padding-right: 8px; }
   .day-head { padding-bottom: 16px; }
+}
+
+/* Entrada escalonada al cambiar de vista */
+.enter > * { animation: enter-up 0.34s var(--ease-out) both; }
+.enter > *:nth-child(1) { animation-delay: 0ms; }
+.enter > *:nth-child(2) { animation-delay: 26ms; }
+.enter > *:nth-child(3) { animation-delay: 52ms; }
+.enter > *:nth-child(4) { animation-delay: 78ms; }
+.enter > *:nth-child(5) { animation-delay: 104ms; }
+.enter > *:nth-child(6) { animation-delay: 130ms; }
+.enter > *:nth-child(7) { animation-delay: 156ms; }
+.enter > *:nth-child(n+8) { animation-delay: 180ms; }
+@keyframes enter-up { from { opacity: 0; transform: translateY(6px); } }
+
+/* Respuesta al tocar */
+.row:active, .card:active, .search-item:active { transform: scale(0.995); }
+.btn.primary:active { transform: scale(0.97); }
+
+@media (max-width: 760px) {
+  .day-head { flex-wrap: wrap; gap: 14px; padding-bottom: 16px; margin-bottom: 14px; }
+  .day-num { font-size: 48px; }
+  .day-info { flex-basis: 100%; order: 3; padding-top: 0; }
+  .day-side { margin-left: auto; }
+  .day-side .btn.primary { padding: 8px 12px; }
 }

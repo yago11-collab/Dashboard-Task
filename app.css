@@ -847,16 +847,18 @@ h1 { text-wrap: balance; }
   .day-side .btn.primary { padding: 8px 12px; }
 }
 
-/* Deslizar para borrar */
+/* Deslizar: izquierda borra, derecha marca urgente */
 .swipe { position: relative; overflow: hidden; border-radius: 10px; transition: max-height 0.18s var(--ease-out), opacity 0.18s var(--ease-out); }
 .swipe > .row { position: relative; background: var(--bg); touch-action: pan-y; }
 .swipe > .row:hover { background: var(--bg-hover); }
 .swipe-bg {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: flex-end; gap: 7px;
-  padding-right: 18px; border-radius: 10px; background: var(--danger-soft); color: var(--danger);
-  font-size: 13px; font-weight: 500; opacity: 0; transition: opacity 0.12s var(--ease-out);
+  position: absolute; inset: 0; display: none; align-items: center; gap: 7px;
+  padding: 0 18px; border-radius: 10px; font-size: 13px; font-weight: 500;
 }
 .swipe-bg i { font-size: 17px; }
-.swipe.swiping .swipe-bg { opacity: 1; }
-.swipe.armed .swipe-bg { background: var(--danger); color: var(--on-accent, #fff); opacity: 1; }
+.swipe-bg.del { justify-content: flex-end; background: var(--danger-soft); color: var(--danger); }
+.swipe-bg.urg { justify-content: flex-start; background: var(--warn-soft); color: var(--warn-text); }
+.swipe.to-left .swipe-bg.del, .swipe.to-right .swipe-bg.urg { display: flex; }
+.swipe.armed.to-left .swipe-bg.del { background: var(--danger); color: #fff; }
+.swipe.armed.to-right .swipe-bg.urg { background: var(--warn-text); color: var(--bg); }
 .swipe.leaving { max-height: 0 !important; opacity: 0; }

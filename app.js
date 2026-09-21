@@ -6,7 +6,7 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const APP_VERSION = '17';
+const APP_VERSION = '18';
 const STALE_DAYS = 10;
 const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana' };
 const BATCH_TEMPLATES = {
@@ -623,7 +623,7 @@ function taskChips(t, opts = {}) {
   return chips;
 }
 
-// Deslizar una fila hacia la izquierda la manda a la papelera (con deshacer)
+// Deslizar una fila: a la izquierda va a la papelera, a la derecha marca o quita urgente
 function enableSwipe(wrap, row, t) {
   let x0 = 0, y0 = 0, dx = 0, sliding = false, decided = false;
   const UMBRAL = 96;
@@ -647,9 +647,11 @@ function enableSwipe(wrap, row, t) {
     }
     if (!sliding) return;
     e.preventDefault();
-    dx = Math.min(0, mx);
+    dx = Math.max(-200, Math.min(200, mx));
     row.style.transform = 'translateX(' + dx + 'px)';
-    wrap.classList.toggle('armed', dx <= -UMBRAL);
+    wrap.classList.toggle('to-left', dx < 0);
+    wrap.classList.toggle('to-right', dx > 0);
+    wrap.classList.toggle('armed', Math.abs(dx) >= UMBRAL);
   }, { passive: false });
 
   const soltar = () => {
@@ -661,9 +663,15 @@ function enableSwipe(wrap, row, t) {
       wrap.style.maxHeight = wrap.offsetHeight + 'px';
       wrap.classList.add('leaving');
       setTimeout(() => removeTask(t), 170);
+    } else if (dx >= UMBRAL) {
+      row.style.transform = '';
+      t.urgent = !t.urgent;
+      saveTasks([t]);
+      toast(t.urgent ? 'Marcada como urgente' : 'Ya no es urgente');
+      setTimeout(render, 160);
     } else {
       row.style.transform = '';
-      wrap.classList.remove('armed');
+      wrap.classList.remove('armed', 'to-left', 'to-right');
     }
     sliding = false;
   };
@@ -683,7 +691,8 @@ function taskRowEl(t, opts = {}) {
     opts.actions ? h('div', { class: 'row-actions' }, opts.actions(t)) : null
   );
   const wrap = h('div', { class: 'swipe' },
-    h('div', { class: 'swipe-bg' }, icon('trash'), h('span', {}, 'Borrar')),
+    h('div', { class: 'swipe-bg urg' }, icon('alert-triangle'), h('span', {}, t.urgent ? 'Quitar urgente' : 'Urgente')),
+    h('div', { class: 'swipe-bg del' }, icon('trash'), h('span', {}, 'Borrar')),
     row);
   enableSwipe(wrap, row, t);
   return wrap;

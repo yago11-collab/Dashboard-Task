@@ -16,6 +16,7 @@ const BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') ?? '';
 const API = `${Deno.env.get('SUPABASE_URL')}/functions/v1/tareas-api`;
 const TIMEZONE = 'Europe/Madrid';
 const CHAT_KEY = 'telegram_chat_id';
+const ULTIMO_KEY = 'telegram_ultimo';
 
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: TIMEZONE }).format(new Date());
 const addDays = (iso: string, n: number) => {
@@ -64,6 +65,21 @@ async function telegram(method: string, payload: unknown) {
 async function getChatId(): Promise<string | null> {
   const { data } = await db.from('app_settings').select('value').eq('key', CHAT_KEY).maybeSingle();
   return data?.value || null;
+}
+
+// Lo último que el bot creó, para poder deshacerlo con "borra eso"
+async function recordarUltimo(tipo: 'tarea' | 'idea', id: string, titulo: string) {
+  await db.from('app_settings').upsert({
+    key: ULTIMO_KEY,
+    value: JSON.stringify({ tipo, id, titulo, at: new Date().toISOString() }),
+    updated_at: new Date().toISOString(),
+  });
+}
+
+async function leerUltimo(): Promise<{ tipo: string; id: string; titulo: string; at: string } | null> {
+  const { data } = await db.from('app_settings').select('value').eq('key', ULTIMO_KEY).maybeSingle();
+  if (!data?.value) return null;
+  try { return JSON.parse(data.value); } catch { return null; }
 }
 
 const send = async (chat: string, text: string) => telegram('sendMessage', { chat_id: chat, text, parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
@@ -185,7 +201,7 @@ async function handleMessage(chatId: string, text: string) {
   if (lower === 'start' || clean === '/start') {
     if (!bound) {
       await db.from('app_settings').upsert({ key: CHAT_KEY, value: chatId, updated_at: new Date().toISOString() });
-      await send(chatId, '<b>Listo.</b> Este chat ya está conectado a tu planificador.\n\nEscríbeme una tarea y la añado: “grabar reel mañana”, “facturación viernes !”, “revisar DMs cada día”.\nPara una idea suelta: <b>idea lo que sea</b>.\n\nComandos: /hoy, /ideas, /pendientes, y <b>hecho &lt;texto&gt;</b>.');
+      await send(chatId, '<b>Listo.</b> Este chat ya está conectado a tu planificador.\n\nEscríbeme una tarea y la añado: “grabar reel mañana”, “facturación viernes !”, “revisar DMs cada día”.\nPara una idea suelta: <b>idea lo que sea</b>.\n\nComandos: /hoy, /ideas, /pendientes, <b>hecho &lt;texto&gt;</b> y <b>borra eso</b>.');
     } else if (bound === chatId) {
       await send(chatId, 'Este chat ya estaba conectado. Escríbeme una tarea o usa /hoy.');
     } else {
@@ -208,7 +224,7 @@ async function handleMessage(chatId: string, text: string) {
     return;
   }
   if (clean === '/ayuda' || clean === '/help') {
-    await send(chatId, 'Escríbeme una tarea para añadirla. Entiendo “hoy”, “mañana”, “el viernes”, “25/9”, “a las 17:00”, “cada día”, “!” para urgente y “#lista”.\n\n<b>idea &lt;texto&gt;</b> · apunta una idea, sin convertirla en tarea\n/hoy · el plan del día\n/ideas · ideas pendientes\n/pendientes · lo que no tiene fecha\nhecho &lt;texto&gt; · completar una tarea');
+    await send(chatId, 'Escríbeme una tarea para añadirla. Entiendo “hoy”, “mañana”, “el viernes”, “25/9”, “a las 17:00”, “cada día”, “!” para urgente y “#lista”.\n\n<b>idea &lt;texto&gt;</b> · apunta una idea, sin convertirla en tarea\n/hoy · el plan del día\n/ideas · ideas pendientes\n/pendientes · lo que no tiene fecha\nhecho &lt;texto&gt; · completar una tarea\nborra eso · deshace lo último que apunté');
     return;
   }
 
@@ -220,11 +236,33 @@ async function handleMessage(chatId: string, text: string) {
     return;
   }
 
+  if (/^\/?(borra eso|borra|deshacer|undo|olvidalo|olvídalo|anula)( .*)?$/i.test(clean)) {
+    const ultimo = await leerUltimo();
+    if (!ultimo) { await send(chatId, 'No tengo nada reciente que borrar.'); return; }
+    // Solo lo creado en la última hora: pasado ese rato, mejor borrarlo en la app
+    if (Date.now() - new Date(ultimo.at).getTime() > 60 * 60 * 1000) {
+      await send(chatId, `Lo último que apunté fue <b>${escapeHtml(ultimo.titulo)}</b>, pero hace más de una hora. Bórralo desde la app para no liarla.`);
+      return;
+    }
+    if (ultimo.tipo === 'idea') await db.from('ideas').update({ archived_at: new Date().toISOString() }).eq('id', ultimo.id);
+    else await db.from('tasks').update({ deleted_at: new Date().toISOString() }).eq('id', ultimo.id);
+    await db.from('app_settings').delete().eq('key', ULTIMO_KEY);
+    await send(chatId, `🗑️ Borrado: <b>${escapeHtml(ultimo.titulo)}</b>` + (ultimo.tipo === 'tarea' ? '\nEstá en la papelera 30 días.' : ''));
+    return;
+  }
+
+  // Un mensaje que empieza por @ suele ser una mención, no una tarea
+  if (/^@\w+$/.test(clean)) {
+    await send(chatId, 'Eso parece una mención, no una tarea, así que no la apunto. Si quieres apuntarla, escríbela con más texto.');
+    return;
+  }
+
   const ideaMatch = clean.match(/^\/?(idea|ideas?:)\s+(.+)$/is);
   if (ideaMatch) {
     try {
       const i = await api('/ideas', { text: ideaMatch[2].trim(), source: 'telegram' });
-      await send(chatId, `💡 Apuntada: <b>${escapeHtml(i.text)}</b>\nLa decides luego en la vista Ideas.`);
+      await recordarUltimo('idea', i.id, i.text);
+      await send(chatId, `💡 Apuntada: <b>${escapeHtml(i.text)}</b>\nLa decides luego en la vista Ideas.\n\n<i>Si me he colado, escribe “borra eso”.</i>`);
     } catch (e) {
       await send(chatId, '⚠️ ' + escapeHtml((e as Error).message));
     }
@@ -251,6 +289,7 @@ async function handleMessage(chatId: string, text: string) {
     const fields = parseTask(clean);
     if (!fields.title) { await send(chatId, 'No he entendido la tarea.'); return; }
     const t = await api('/tasks', fields);
+    await recordarUltimo('tarea', t.id, t.title);
     const detalle = [t.list, t.when ? fmtDate(t.when) : '', t.recurrence ? 'se repite' : '', t.urgent ? 'urgente' : ''].filter(Boolean).join(' · ');
     await send(chatId, `➕ <b>${escapeHtml(t.title)}</b>\n<i>${escapeHtml(detalle)}</i>`);
   } catch (e) {

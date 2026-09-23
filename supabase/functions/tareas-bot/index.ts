@@ -1,11 +1,12 @@
 // Bot de Telegram del planificador. Es una capa fina sobre la función tareas-api.
 //
 //   POST /tareas-bot/k/<clave>/setup    registra el webhook en Telegram (lo llamo yo una vez)
-//   POST /tareas-bot/webhook            mensajes del bot (Telegram lo llama; valida cabecera secreta)
+//   POST /tareas-bot/webhook            mensajes y botones del bot (Telegram lo llama; valida cabecera secreta)
 //   POST /tareas-bot/k/<clave>/daily    manda el plan del día (lo llama el cron de la base de datos)
 //   POST /tareas-bot/k/<clave>/review   manda la revisión de tareas paradas
 //
-// Secretos: TAREAS_API_KEY (la misma de tareas-api) y TELEGRAM_BOT_TOKEN.
+// Secretos: TAREAS_API_KEY (la misma de tareas-api), TELEGRAM_BOT_TOKEN y TYPEFULLY_API_KEY
+// (esta última para los botones Publicar y Programar de los avisos de contenido).
 // El chat autorizado se guarda solo la primera vez que se escribe /start.
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
@@ -297,6 +298,123 @@ async function handleMessage(chatId: string, text: string) {
   }
 }
 
+// ===== Botones de Typefully (avisos de la caza de contenido) =====
+// Los avisos llegan con botones cuyo callback_data es "tf:<accion>:<cuenta>:<draft>".
+// Publicar pide confirmación. Programar busca el primer hueco de las franjas habituales
+// que deje al menos 3 horas con lo ya programado o publicado en esa cuenta.
+// Secreto: TYPEFULLY_API_KEY.
+const TYPEFULLY_KEY = Deno.env.get('TYPEFULLY_API_KEY') ?? '';
+const TF_CUENTAS: Record<string, string> = { '170360': 'Yoker', '178070': 'ValerIA' };
+const TF_HUECOS: [number, number][] = [[9, 0], [12, 45], [16, 0], [20, 0]];
+const TF_MARGEN_MIN = 180;
+
+async function typefully(path: string, init: RequestInit = {}): Promise<any> {
+  const res = await fetch('https://api.typefully.com/v2' + path, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + TYPEFULLY_KEY },
+  });
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error?.message || data?.detail || data?.message || 'Typefully: error ' + res.status);
+  return data;
+}
+
+// Hora de Madrid -> instante UTC, sin depender del horario de verano
+function madridUtc(fecha: string, h: number, m: number): Date {
+  const [y, mo, d] = fecha.split('-').map(Number);
+  const guess = new Date(Date.UTC(y, mo - 1, d, h, m));
+  const p: Record<string, string> = Object.fromEntries(
+    new Intl.DateTimeFormat('en-GB', { timeZone: TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+      .formatToParts(guess).map((x) => [x.type, x.value]),
+  );
+  const local = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute);
+  return new Date(guess.getTime() - (local - guess.getTime()));
+}
+
+const tfFecha = (d: Date) => new Intl.DateTimeFormat('es-ES', { timeZone: TIMEZONE, weekday: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(d);
+
+async function tfOcupadas(cuenta: string): Promise<number[]> {
+  const [prog, pub] = await Promise.all([
+    typefully(`/social-sets/${cuenta}/drafts?status=scheduled&limit=50`),
+    typefully(`/social-sets/${cuenta}/drafts?status=published&order_by=-published_at&limit=3`),
+  ]);
+  const out: number[] = [];
+  for (const d of prog.results || []) if (d.scheduled_date) out.push(new Date(d.scheduled_date).getTime());
+  for (const d of pub.results || []) if (d.published_at) out.push(new Date(d.published_at).getTime());
+  return out;
+}
+
+async function tfHueco(cuenta: string): Promise<Date> {
+  const ocupadas = await tfOcupadas(cuenta);
+  const desde = Date.now() + 15 * 60000;
+  for (let i = 0; i < 8; i++) {
+    const fecha = addDays(today(), i);
+    for (const [h, m] of TF_HUECOS) {
+      const t = madridUtc(fecha, h, m);
+      if (t.getTime() < desde) continue;
+      if (ocupadas.every((o) => Math.abs(o - t.getTime()) >= TF_MARGEN_MIN * 60000)) return t;
+    }
+  }
+  throw new Error('No hay hueco libre en los próximos 8 días');
+}
+
+function tfTeclado(cuenta: string, draft: string): any {
+  return { inline_keyboard: [
+    [{ text: '🚀 Publicar', callback_data: `tf:pub:${cuenta}:${draft}` }, { text: '🗓 Programar', callback_data: `tf:prog:${cuenta}:${draft}` }],
+    [{ text: '✏️ Abrir en Typefully', url: `https://typefully.com/?d=${draft}&a=${cuenta}` }],
+  ] };
+}
+const tfSoloAbrir = (cuenta: string, draft: string): any => ({ inline_keyboard: [[{ text: '✏️ Abrir en Typefully', url: `https://typefully.com/?d=${draft}&a=${cuenta}` }]] });
+
+async function handleCallback(cb: any) {
+  const chat = String(cb.message?.chat?.id ?? '');
+  const msgId = cb.message?.message_id;
+  const responder = (text = '', alerta = false) => telegram('answerCallbackQuery', { callback_query_id: cb.id, text, show_alert: alerta });
+  const bound = await getChatId();
+  if (!bound || chat !== bound || String(cb.from?.id) !== bound) { await responder('Este botón no es para ti.'); return; }
+  const m = String(cb.data || '').match(/^tf:(pub|pubok|prog|volver):(\d+):(\d+)$/);
+  if (!m) { await responder(); return; }
+  const [, accion, cuenta, draft] = m;
+  const nombre = TF_CUENTAS[cuenta];
+  if (!nombre) { await responder('Cuenta no permitida.', true); return; }
+  if (!TYPEFULLY_KEY) { await responder('Falta el secreto TYPEFULLY_API_KEY en Supabase.', true); return; }
+  const marcar = (reply_markup: any) => telegram('editMessageReplyMarkup', { chat_id: chat, message_id: msgId, reply_markup });
+  const contestar = (text: string) => telegram('sendMessage', { chat_id: chat, text, parse_mode: 'HTML', reply_parameters: { message_id: msgId }, link_preview_options: { is_disabled: true } });
+
+  if (accion === 'volver') { await marcar(tfTeclado(cuenta, draft)); await responder(); return; }
+
+  if (accion === 'pub') {
+    // Paso de confirmación, con aviso si se salta el margen de 3 horas
+    let aviso = '';
+    try {
+      const ahora = Date.now(), ocupadas = await tfOcupadas(cuenta);
+      const antes = ocupadas.filter((o) => o <= ahora), despues = ocupadas.filter((o) => o > ahora);
+      const ultima = antes.length ? Math.max(...antes) : 0, proxima = despues.length ? Math.min(...despues) : 0;
+      if (ultima && ahora - ultima < TF_MARGEN_MIN * 60000) aviso = `Ojo: lo último de ${nombre} salió hace ${Math.round((ahora - ultima) / 60000)} min.`;
+      else if (proxima && proxima - ahora < TF_MARGEN_MIN * 60000) aviso = `Ojo: tienes algo programado en ${nombre} dentro de ${Math.round((proxima - ahora) / 60000)} min.`;
+    } catch { /* si no se puede mirar la cola, se pregunta sin aviso */ }
+    await marcar({ inline_keyboard: [[{ text: '✅ Sí, publicar ya', callback_data: `tf:pubok:${cuenta}:${draft}` }, { text: '↩️ Volver', callback_data: `tf:volver:${cuenta}:${draft}` }]] });
+    await responder(aviso ? aviso + ' ¿Publicar igualmente?' : `¿Publicar ahora en ${nombre}?`, !!aviso);
+    return;
+  }
+
+  await responder('Un momento…');
+  try {
+    if (accion === 'pubok') {
+      await typefully(`/social-sets/${cuenta}/drafts/${draft}`, { method: 'PATCH', body: JSON.stringify({ publish_at: 'now' }) });
+      await marcar(tfSoloAbrir(cuenta, draft));
+      await contestar(`✅ <b>Publicando en ${nombre}.</b> En unos segundos está en X.`);
+    } else {
+      const t = await tfHueco(cuenta);
+      const d = await typefully(`/social-sets/${cuenta}/drafts/${draft}`, { method: 'PATCH', body: JSON.stringify({ publish_at: t.toISOString() }) });
+      await marcar(tfSoloAbrir(cuenta, draft));
+      await contestar(`🗓 <b>Programado en ${nombre}</b> para el ${tfFecha(new Date(d.scheduled_date || t))}.`);
+    }
+  } catch (e) {
+    await marcar(tfTeclado(cuenta, draft)).catch(() => {});
+    await contestar('⚠️ No se ha podido: ' + escapeHtml((e as Error).message));
+  }
+}
+
 // ===== HTTP =====
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -320,6 +438,10 @@ Deno.serve(async (req) => {
     if (!keyOk(req.headers.get('x-telegram-bot-api-secret-token'))) return json({ error: 'no' }, 401);
     let update: any = {};
     try { update = await req.json(); } catch { /* cuerpo vacío */ }
+    if (update.callback_query) {
+      try { await handleCallback(update.callback_query); } catch (e) { console.error('Error atendiendo el botón:', e); }
+      return json({ ok: true });
+    }
     const msg = update.message || update.edited_message;
     const text = msg?.text;
     const chatId = msg?.chat?.id;
@@ -340,7 +462,7 @@ Deno.serve(async (req) => {
   try {
     if (path === '/setup') {
       const hook = `https://${url.host}/functions/v1/tareas-bot/webhook`;
-      await telegram('setWebhook', { url: hook, secret_token: API_KEY, allowed_updates: ['message'], drop_pending_updates: true });
+      await telegram('setWebhook', { url: hook, secret_token: API_KEY, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true });
       const me = await telegram('getMe', {});
       return json({ ok: true, bot: me.username, webhook: hook, chat: await getChatId() });
     }

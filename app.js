@@ -6,7 +6,7 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const APP_VERSION = '20';
+const APP_VERSION = '21';
 const STALE_DAYS = 10;
 const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana', biweekly: 'Cada 2 semanas', monthly: 'Cada mes' };
 
@@ -216,7 +216,8 @@ async function flushOps() {
 function saveSnapshot() {
   try {
     localStorage.setItem(SNAPSHOT_KEY, JSON.stringify({
-      at: Date.now(), columns: state.columns, tasks: state.tasks, trash: state.trash, batches: state.batches, ideas: state.ideas
+      at: Date.now(), columns: state.columns, tasks: state.tasks, trash: state.trash, batches: state.batches, ideas: state.ideas,
+      schema: { hasNewSchema: state.hasNewSchema, hasBatches: state.hasBatches, hasEstimates: state.hasEstimates, hasTrash: state.hasTrash, hasIdeas: state.hasIdeas }
     }));
   } catch (e) { /* sin espacio */ }
 }
@@ -226,6 +227,7 @@ function loadSnapshot() {
     const raw = JSON.parse(localStorage.getItem(SNAPSHOT_KEY) || 'null');
     if (!raw || !raw.columns) return false;
     state.columns = raw.columns; state.tasks = raw.tasks || []; state.trash = raw.trash || []; state.batches = raw.batches || []; state.ideas = raw.ideas || [];
+    if (raw.schema) Object.assign(state, raw.schema);
     state.loadedAt = raw.at || 0;
     return true;
   } catch (e) { return false; }
@@ -319,19 +321,30 @@ function fromRow(r, migrated) {
 }
 
 async function loadAll() {
-  const probeTasks = await sb.from('tasks').select('scheduled_on').limit(1);
-  state.hasNewSchema = !probeTasks.error;
-  const probeBatches = await sb.from('batches').select('id').limit(1);
-  state.hasBatches = !probeBatches.error;
-  const probeEstimate = await sb.from('tasks').select('estimate_min').limit(1);
-  state.hasEstimates = !probeEstimate.error;
-  const probeTrash = await sb.from('tasks').select('deleted_at').limit(1);
-  state.hasTrash = !probeTrash.error;
-  const probeIdeas = await sb.from('ideas').select('id').limit(1);
-  state.hasIdeas = !probeIdeas.error;
+  aplicarDatos(await pedirDatos());
+}
 
-  const cols = await run(sb.from('columns').select('*').order('position'));
-  const rows = await run(sb.from('tasks').select('*').order('position'));
+function pedirDatos() {
+  // Todo a la vez: en el móvil cada viaje a Supabase cuesta, y en fila sumaban varios segundos.
+  // Las sondas dicen qué migraciones están aplicadas; si falta una tabla, su consulta da error y se ignora
+  return Promise.all([
+    sb.from('tasks').select('scheduled_on').limit(1),
+    sb.from('tasks').select('estimate_min').limit(1),
+    sb.from('tasks').select('deleted_at').limit(1),
+    run(sb.from('columns').select('*').order('position')),
+    run(sb.from('tasks').select('*').order('position')),
+    sb.from('ideas').select('*').is('archived_at', null).order('created_at', { ascending: false }),
+    sb.from('batches').select('*').order('position'),
+    sb.from('batch_items').select('*').order('position')
+  ]);
+}
+
+function aplicarDatos([probeTasks, probeEstimate, probeTrash, cols, rows, ideas, bs, items]) {
+  state.hasNewSchema = !probeTasks.error;
+  state.hasEstimates = !probeEstimate.error;
+  state.hasTrash = !probeTrash.error;
+  state.hasIdeas = !ideas.error;
+  state.hasBatches = !bs.error && !items.error;
 
   state.columns = cols.map(c => ({ id: c.id, title: c.title, position: c.position || 0 }));
   const migrated = [];
@@ -352,17 +365,14 @@ async function loadAll() {
 
   state.ideas = [];
   if (state.hasIdeas) {
-    const rows = await run(sb.from('ideas').select('*').is('archived_at', null).order('created_at', { ascending: false }));
-    state.ideas = rows.map(r => ({ id: r.id, text: r.text, note: r.note || '', source: r.source || 'app', createdAt: r.created_at }));
+    state.ideas = ideas.data.map(r => ({ id: r.id, text: r.text, note: r.note || '', source: r.source || 'app', createdAt: r.created_at }));
   }
 
   state.batches = [];
   if (state.hasBatches) {
-    const bs = await run(sb.from('batches').select('*').order('position'));
-    const items = await run(sb.from('batch_items').select('*').order('position'));
-    state.batches = bs.map(b => ({
+    state.batches = bs.data.map(b => ({
       id: b.id, title: b.title, stages: b.stages || [], stageDates: b.stage_dates || {}, position: b.position || 0,
-      items: items.filter(i => i.batch_id === b.id).map(i => ({ id: i.id, batchId: b.id, title: i.title, stage: i.stage || 0, position: i.position || 0 }))
+      items: items.data.filter(i => i.batch_id === b.id).map(i => ({ id: i.id, batchId: b.id, title: i.title, stage: i.stage || 0, position: i.position || 0 }))
     }));
   }
   state.loadedAt = Date.now();
@@ -1787,14 +1797,16 @@ function render() {
 // ===== Cambios desde otro dispositivo, al instante =====
 let recargaPendiente = null;
 
+// Con algo abierto o a medio escribir no se recarga: se perdería lo que se está tocando
+const ocupado = () => !!(ops.length || state.detailId || !$('#modalWrap').hidden || state.addingIn ||
+  /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName) || $('.popmenu'));
+
 function escucharCambios() {
   sb.channel('cambios-tareas')
     .on('postgres_changes', { event: '*', schema: 'public' }, () => {
       // Los cambios que acabo de mandar yo no hace falta recargarlos
       if (Date.now() - ultimoEnvioPropio < 2500) return;
-      const ocupado = ops.length || state.detailId || !$('#modalWrap').hidden || state.addingIn ||
-        /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName) || $('.popmenu');
-      if (ocupado) return;
+      if (ocupado()) return;
       clearTimeout(recargaPendiente);
       recargaPendiente = setTimeout(async () => {
         try { await loadAll(); saveSnapshot(); render(); } catch (e) { console.warn('No se ha podido refrescar:', e); }
@@ -1804,18 +1816,46 @@ function escucharCambios() {
 }
 
 // ===== Sesión =====
+let pintadoConCopia = false;
+
+// Abre al instante con la última copia guardada; los datos frescos llegan detrás
+function pintarCopia() {
+  if (pintadoConCopia || !loadSnapshot()) return;
+  pintadoConCopia = true;
+  render();
+}
+
 async function start() {
+  pintarCopia();
+  // La agenda va por su lado (la función puede tardar en despertar); con copia se pide ya
+  if (pintadoConCopia) loadAgenda();
   try {
-    await loadAll();
+    // Primero lo que quedó sin enviar, para que la recarga ya lo traiga
+    await flushOps();
+    if (pintadoConCopia) {
+      // Ya se ve la copia: si mientras llegan los datos se ha abierto o cambiado algo,
+      // se espera a que quede libre para no pisarlo, y se vuelve a pedir si hubo cambios
+      let datos, desde;
+      do {
+        desde = Date.now();
+        datos = await pedirDatos();
+        while (ocupado()) {
+          if (ops.length) flushOps();
+          await new Promise(r => setTimeout(r, 1500));
+        }
+      } while (ultimoEnvioPropio > desde);
+      aplicarDatos(datos);
+    } else {
+      await loadAll();
+    }
     state.offline = false;
     saveSnapshot();
     render();
-    loadAgenda();
-    flushOps();
+    if (!pintadoConCopia) loadAgenda();
     escucharCambios();
   } catch (e) {
     console.error(e);
-    if (loadSnapshot()) {
+    if (pintadoConCopia || loadSnapshot()) {
       // Sin conexión: se trabaja sobre la última copia y los cambios esperan en la cola
       state.offline = true;
       render();
@@ -1878,6 +1918,8 @@ if ('serviceWorker' in navigator) {
 }
 
 (async () => {
+  // Si hay sesión guardada se pinta la copia sin esperar a Supabase (renovar el token va por red)
+  try { if (localStorage.getItem('sb-' + new URL(SUPABASE_URL).hostname.split('.')[0] + '-auth-token')) pintarCopia(); } catch (e) { /* sin almacenamiento */ }
   const { data: { session } } = await sb.auth.getSession();
   if (session) start();
   else $('#loginScreen').hidden = false;

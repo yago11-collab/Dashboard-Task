@@ -1,7 +1,7 @@
 // Copia local de la app para que abra sin conexión.
 // La versión sube con cada publicación: al cambiar, se tira la copia anterior.
-const VERSION = 'tareas-v20';
-const SHELL = ['dashboard-supabase.html', 'app.css?v=20', 'app.js?v=20', 'apple-touch-icon.png?v=20', 'favicon.png?v=20', 'manifest.json?v=20'];
+const VERSION = 'tareas-v21';
+const SHELL = ['dashboard-supabase.html', 'app.css?v=21', 'app.js?v=21', 'apple-touch-icon.png?v=21', 'favicon.png?v=21', 'manifest.json?v=21'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -13,6 +13,11 @@ self.addEventListener('activate', (e) => {
     .then(() => self.clients.claim()));
 });
 
+const guardar = (req, res) => {
+  if (res && (res.ok || res.type === 'opaque')) { const copy = res.clone(); caches.open(VERSION).then(c => c.put(req, copy)).catch(() => {}); }
+  return res;
+};
+
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
@@ -21,17 +26,21 @@ self.addEventListener('fetch', (e) => {
   const isAsset = /cdn\.jsdelivr\.net|fonts\.(googleapis|gstatic)\.com/.test(url.host);
   if (!isShell && !isAsset) return; // Supabase y calendarios siempre van a la red
 
-  // La app primero desde la red, para recibir cambios; si falla, desde la copia
-  e.respondWith(
-    fetch(req)
-      .then((res) => {
-        if (res && res.ok) {
-          const copy = res.clone();
-          caches.open(VERSION).then(c => c.put(req, copy)).catch(() => {});
-        }
-        return res;
-      })
-      .catch(() => caches.match(req, { ignoreSearch: true })
-        .then(hit => hit || caches.match('dashboard-supabase.html', { ignoreSearch: true })))
-  );
+  // Lo que lleva versión (?v=, librerías con número fijo, fuentes) no cambia nunca: directo de la copia
+  if (isAsset || url.searchParams.has('v')) {
+    e.respondWith(caches.match(req).then(hit => hit || fetch(req).then(res => guardar(req, res))));
+    return;
+  }
+
+  // La página, primero desde la red para recibir cambios; si la red tarda o falla, desde la copia
+  const red = fetch(req).then(res => guardar(req, res));
+  const copia = () => caches.match(req, { ignoreSearch: true })
+    .then(hit => hit || caches.match('dashboard-supabase.html', { ignoreSearch: true }));
+  e.respondWith(new Promise((resolve) => {
+    let hecho = false;
+    const usar = (r) => { if (!hecho && r) { hecho = true; resolve(r); } };
+    const espera = setTimeout(() => copia().then(usar), 1500);
+    red.then((res) => { clearTimeout(espera); usar(res); })
+      .catch(() => { clearTimeout(espera); copia().then(hit => { usar(hit); if (!hecho) resolve(Response.error()); }); });
+  }));
 });

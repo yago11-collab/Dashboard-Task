@@ -6,7 +6,7 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const APP_VERSION = '21';
+const APP_VERSION = '22';
 const STALE_DAYS = 10;
 const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana', biweekly: 'Cada 2 semanas', monthly: 'Cada mes' };
 
@@ -1127,17 +1127,19 @@ function renderIdeas(view) {
     setTimeout(() => $('#quickInput') && $('#quickInput').focus(), 10);
   });
   box.append(h('div', { class: 'quick' }, icon('bulb'), input),
-    h('p', { class: 'quick-hint' }, 'También puedes mandárselas al bot de Telegram escribiendo “idea …”, o pedírselo a Claude.'));
+    h('p', { class: 'quick-hint' }, 'Toca una idea para corregirla. También puedes mandárselas al bot de Telegram escribiendo “idea …”, o pedírselo a Claude.'));
 
   if (!list.length) box.append(emptyState('bulb', 'Sin ideas pendientes', 'Todo lo que has apuntado ya está convertido en tarea, en pieza de un lote o descartado.'));
 
   const FUENTES = { telegram: 'Telegram', claude: 'Claude', chatgpt: 'ChatGPT', app: 'App' };
   list.forEach(idea => {
     const dias = idea.createdAt ? daysBetween(iso(new Date(idea.createdAt)), today()) : 0;
+    const texto = h('div', { class: 'row-title', style: 'cursor: text;', title: 'Tocar para corregir',
+      onclick: () => inlineEdit(texto, idea.text, (v) => { idea.text = v; saveIdea(idea); }, true) }, idea.text);
     box.append(h('div', { class: 'row' },
       h('span', { class: 'check', style: 'border-style: dashed;' }),
       h('div', { class: 'row-main' },
-        h('div', { class: 'row-title' }, idea.text),
+        texto,
         h('div', { class: 'row-meta' },
           h('span', { class: 'chip' }, FUENTES[idea.source] || idea.source),
           h('span', { class: 'chip' }, dias === 0 ? 'hoy' : 'hace ' + dias + (dias === 1 ? ' día' : ' días')))),
@@ -1336,8 +1338,14 @@ function renderLotes(view) {
   state.batches.forEach(b => view.append(batchEl(b)));
 }
 
-function inlineEdit(el, value, onsave) {
-  const input = h('input', { type: 'text', value, style: 'font: inherit; padding: 2px 6px; border: 1.5px solid var(--accent); border-radius: 6px; outline: none; background: var(--bg); min-width: 0; width: 100%;' });
+function inlineEdit(el, value, onsave, multiline) {
+  const style = 'font: inherit; padding: 2px 6px; border: 1.5px solid var(--accent); border-radius: 6px; outline: none; background: var(--bg); min-width: 0; width: 100%;';
+  // Los textos largos (ideas) se editan en varias líneas; Intro guarda igual
+  const input = multiline
+    ? h('textarea', { value, rows: 1, style: style + ' resize: none; overflow: hidden; line-height: inherit; display: block;' })
+    : h('input', { type: 'text', value, style });
+  const ajustar = () => { input.style.height = 'auto'; input.style.height = input.scrollHeight + 'px'; };
+  if (multiline) input.addEventListener('input', ajustar);
   let closed = false;
   const close = (save) => {
     if (closed) return; closed = true;
@@ -1345,9 +1353,16 @@ function inlineEdit(el, value, onsave) {
     if (save && v && v !== value) onsave(v);
     render();
   };
-  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') close(true); if (e.key === 'Escape') close(false); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); close(true); }
+    if (e.key === 'Escape') close(false);
+  });
   input.addEventListener('blur', () => close(true));
-  el.replaceWith(input); input.focus(); input.select();
+  el.replaceWith(input);
+  if (multiline) ajustar();
+  input.focus();
+  // En el móvil se deja el cursor al final: seleccionarlo todo invita a borrarlo sin querer
+  if (multiline) input.setSelectionRange(value.length, value.length); else input.select();
 }
 
 function batchEl(b) {

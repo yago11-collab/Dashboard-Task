@@ -866,3 +866,7 @@ h1 { text-wrap: balance; }
 /* Arrastrar con el dedo para reordenar */
 .swipe.dragging-row { z-index: 5; }
 .swipe.dragging-row > .row { box-shadow: var(--shadow-lg); border-radius: 10px; background: var(--bg-card); transform-origin: center; }
+
+/* Urgente tiene que verse de lejos: relleno sólido, distinto del "atrasado" suave */
+.chip.urgent { background: var(--danger); color: var(--bg); font-weight: 600; }
+.row.urgent .check { border-color: var(--danger); border-width: 2px; }

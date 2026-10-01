@@ -6,7 +6,7 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const APP_VERSION = '22';
+const APP_VERSION = '23';
 const STALE_DAYS = 10;
 const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana', biweekly: 'Cada 2 semanas', monthly: 'Cada mes' };
 
@@ -649,7 +649,7 @@ function checkBtn(on, onclick, square) {
 function taskChips(t, opts = {}) {
   const chips = [];
   const now = today();
-  if (t.urgent) chips.push(h('span', { class: 'chip urgent' }, 'Urgente'));
+  if (t.urgent) chips.push(h('span', { class: 'chip urgent' }, icon('flame'), 'Urgente'));
   if (t.deadlineOn) chips.push(h('span', { class: 'chip ' + (t.deadlineOn <= now && !t.checked ? 'late' : 'date') }, icon('flag'), 'Vence ' + fmtDate(t.deadlineOn)));
   if (t.scheduledOn && !opts.hideDate && !(t.recurrence && t.lastDoneOn === now)) {
     chips.push(h('span', { class: 'chip ' + (t.scheduledOn < now && !t.checked ? 'late' : 'date') }, icon('calendar'), fmtDate(t.scheduledOn)));
@@ -773,7 +773,7 @@ function enableTouchSort(wrap, row, t, opts) {
 
 function taskRowEl(t, opts = {}) {
   const done = t.checked || (t.recurrence && t.lastDoneOn === today());
-  const row = h('div', { class: 'row' + (done ? ' done' : '') },
+  const row = h('div', { class: 'row' + (done ? ' done' : t.urgent ? ' urgent' : '') },
     checkBtn(done, () => toggleTask(t)),
     h('div', { class: 'row-main', onclick: () => openDetail(t.id) },
       h('div', { class: 'row-title' }, t.title),

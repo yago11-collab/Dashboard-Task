@@ -64,7 +64,7 @@ function h(tag, attrs, ...kids) {
 }
 
 const icon = (name) => h('i', { class: 'ti ti-' + name, 'aria-hidden': 'true' });
-const ESTIMATES = [15, 30, 60, 90, 120];
+const ESTIMATES = [5, 10, 15, 30, 60, 90, 120];
 
 function fmtMin(n) {
   if (!n) return '';
@@ -581,7 +581,7 @@ function parseQuick(text) {
     const m = t.match(re);
     if (m && fn(m) !== false) t = t.replace(m[0], ' ');
   };
-  take(/\s(!{1,3}|urgente)(?=\s)/i, () => { out.urgent = true; });
+  take(/\s(?:!{1,3}|urgente)(?=\s)|\s!{1,3}(?=[^\s!])|(?<=[^\s!])!{1,3}(?=\s)/i, () => { out.urgent = true; });
   take(/\scada d[ií]a(?=\s)/i, () => { out.recurrence = 'daily'; });
   take(/\scada semana(?=\s)/i, () => { out.recurrence = 'weekly'; });
   take(/\scada mes(?=\s)/i, () => { out.recurrence = 'monthly'; });

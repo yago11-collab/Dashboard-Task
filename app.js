@@ -6,7 +6,7 @@ const SUPABASE_URL = 'https://zttdbsprkqconspnwzxx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_EhqGSiQhnz0LdYst45viZg_H-J43bX3';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const APP_VERSION = '24';
+const APP_VERSION = '25';
 const STALE_DAYS = 10;
 const RECURRENCES = { daily: 'Cada día', weekdays: 'Días laborables', weekly: 'Cada semana', biweekly: 'Cada 2 semanas', monthly: 'Cada mes' };
 

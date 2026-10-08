@@ -1,7 +1,7 @@
 // Copia local de la app para que abra sin conexión.
 // La versión sube con cada publicación: al cambiar, se tira la copia anterior.
-const VERSION = 'tareas-v24';
-const SHELL = ['dashboard-supabase.html', 'app.css?v=24', 'app.js?v=24', 'apple-touch-icon.png?v=24', 'favicon.png?v=24', 'manifest.json?v=24'];
+const VERSION = 'tareas-v25';
+const SHELL = ['dashboard-supabase.html', 'app.css?v=25', 'app.js?v=25', 'apple-touch-icon.png?v=25', 'favicon.png?v=25', 'manifest.json?v=25'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
